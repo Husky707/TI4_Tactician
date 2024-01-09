@@ -1,0 +1,377 @@
+-----------------------------------------------------------------------------
+--Get helper
+function getHelperClient(helperObjectName)
+    local function getHelperObject()
+        for _, object in ipairs(getAllObjects()) do
+            if object.getName() == helperObjectName then return object end
+        end
+        error('missing object "' .. helperObjectName .. '"')
+    end
+    local helperObject = false
+    local function getCallWrapper(functionName)
+        helperObject = helperObject or getHelperObject()
+        if not helperObject.getVar(functionName) then error('missing ' .. helperObjectName .. '.' .. functionName) end
+        return function(parameters) return helperObject.call(functionName, parameters) end
+    end
+    return setmetatable({}, { __index = function(t, k) return getCallWrapper(k) end })
+end
+-----------------------------------------------------------------------------
+
+local showDebug = false
+local factionHelper = getHelperClient('TI4_FACTION_HELPER')
+local systemHelper = getHelperClient('TI4_SYSTEM_HELPER')
+
+local factionsInPlay = {} --Table {color, faction}
+local registeredTokens = {} --Table {token's GUID, object}
+
+local FLAT_ICONS = true
+local ICON_URLS = {
+  ['White'] = 'http://cloud-3.steamusercontent.com/ugc/1871806044359836660/0560E1060EC1B6D1A0EC6B5542838FE053D47031/',
+  ['Brown'] = 'http://cloud-3.steamusercontent.com/ugc/1871806438944962462/E00C7D944F85FB157AC767A8F1AC1535ED0D8491/',
+  ['Red'] = 'http://cloud-3.steamusercontent.com/ugc/1871806438944962827/AB36B6D3E9A9F6F9AD766DA14957E61156961F1D/',
+  ['Orange'] = 'http://cloud-3.steamusercontent.com/ugc/1871806438944962648/F1883A1248525151FBF0F79577EF3674F7680D4F/',
+  ['Yellow'] = 'http://cloud-3.steamusercontent.com/ugc/1871806438944962917/0156141EB2BA661DB10432EEFDB00708FC92EE79/',
+  ['Green'] = 'http://cloud-3.steamusercontent.com/ugc/1871806438944962531/2649114D15504EA5A30715844D08FDB892BB54E4/',
+  ['Blue'] = 'http://cloud-3.steamusercontent.com/ugc/1871806044356324981/1B538DAD2EE25802BB7590D93430AC94C8111B5C/',
+  ['Purple'] = 'http://cloud-3.steamusercontent.com/ugc/1871806438944962774/EAE45B1C6DEF91B4D874327267E64909C16D304D/',
+  ['Pink'] = 'http://cloud-3.steamusercontent.com/ugc/1871806438944962704/CDC452087D9E3587513C5035606DC8D98AEE8CFF/'
+}
+-----------------------------------------------------
+function onLoad()
+  --Attach each decal to this object to cache each decal
+  --This prevents the white rectangle from appearing when loading a new decal
+  local decals ={}
+  for color,eachDecal in pairs(ICON_URLS) do
+    table.insert(decals, {
+      name     = 'Preload_' .. color,
+      url      = eachDecal,
+      position = self.getPosition(),
+      rotation = { x = 270, y = 0, z = 0 },
+      scale = {x = 1, y = 1, z = 1 }
+    })
+  end
+  self.setDecals(decals)
+end
+---------------------------------------------------------------------
+
+--Check for shipside tokens after a drop
+function onObjectDrop(color, object)
+  _EvaluateCommandTokens(_ExtractCommandTokens(object))
+end
+
+--Check to remove after object enters a container
+--[[ Seems to be bugged. Not removing decals from items entering a container
+--function onObjectEnterContainer(container, object)
+function tryObjectEnterContainer(container, object)
+  if _ObjectIsCommandToken(object) then _RemoveDecal(object) end
+end
+--]]
+
+function onObjectDestroy(object)
+  if _ObjectIsCommandToken(object) then _RemoveDecal(object) end
+end
+
+--Check for shipside tokens after a flip
+function onPlayerAction(player, action, targets)
+  if action == Player.Action.FlipOver
+  or action == Player.Action.FlipIncrementalLeft
+  or action == Player.Action.FlipIncrementalRight
+  then
+  if showDebug then print("____________\nFlip detected:") end
+    _EvaluateCommandTokens(_ExtractCommandTokens(targets))
+
+  elseif action == Player.Action.PickUp then
+    local tokens = _ExtractCommandTokens(targets)
+    if tokens ~= nil then
+      for _,eachToken in pairs(tokens) do
+        _RemoveDecal(eachToken)
+      end
+    end
+  end --end actions
+end
+
+--Force remove all decals when this object is destroyed
+function onDestroy()
+  for _, eachToken in pairs(registeredTokens) do
+    _RemoveDecal(eachToken)
+  end
+end
+-----------------------------------------------------
+function _EvaluateCommandTokens(tokenObjects)
+  if tokenObjects == nil or next(tokenObjects) == nil then return end
+  --Separate shipsideUp and shipsideDown tokens
+    local shipsideUpTokens = {}
+    local shipsideDownTokens = {}
+    for _,eachToken in pairs(tokenObjects) do
+      if _ObjectIsFaceUp(eachToken) then
+        table.insert(shipsideDownTokens, eachToken)
+      else
+        table.insert(shipsideUpTokens, eachToken)
+      end
+    end
+
+    --Are there any shipside up tokens? If so, try add/remove decals
+    if shipsideUpTokens ~= nil and next(shipsideUpTokens) ~= nil then
+      if showDebug then print("ShipsideUp tokens identified.") end
+
+      for _,eachToken in pairs(shipsideUpTokens) do
+        --Test to remove decals from tokens that already have one
+        local id = eachToken.getGUID()
+        if registeredTokens[id] then
+          _TryRemoveDecal(eachToken)
+        else --Token does not have a decal. Try to give it one
+          if not _TryApplyDecal(eachToken) then _RemoveDecal(eachToken) end
+        end
+      end
+    end --end shipsideUpTokens
+
+    --Remove decals from shipside down tokens
+    for _,eachToken in pairs(shipsideDownTokens) do
+      _RemoveDecal(eachToken)
+    end
+end
+
+-- Gets a table of command token objects from a list or instance of an object
+--returns table:{commandToken_Objects} or nil
+function _ExtractCommandTokens(objectOrObjectTable)
+  if objectOrObjectTable == nil then return end
+  --Set targets to be a table
+  local targetObjs = {}
+  if type(objectOrObjectTable) ~= 'table' then
+    table.insert(targetObjs, objectOrObjectTable)
+  else
+    targetObjs = objectOrObjectTable
+  end
+
+  --Determine if any objects are command tokens
+  local tokenObjects = {}
+  for _,eachObj in pairs(targetObjs) do
+    if _ObjectIsCommandToken(eachObj) then
+      table.insert(tokenObjects, eachObj)
+    end
+  end
+  if tokenObjects == nil or next(tokenObjects) == nil then
+    if showDebug then print("No objects were identified as command tokens.") end
+    return nil
+  end
+  return tokenObjects
+end
+
+-----------------------------------------------------
+--
+function _TryApplyDecal(toTokenObject)
+  --Currently assuming tokenObject is faceUp
+  if showDebug then print("__________________________\nAttempting to add decal to a token:") end
+
+  --Is token in play? If it is a zone - do not add
+
+  if not _ObjectIsOnGameboard(toTokenObject) then
+    if showDebug then print("Failed attempt: Object not in play.") end
+    return false
+  end
+  --Is it being held?
+  if toTokenObject.held_by_color then
+    if showDebug then print("Failed attempt: Object in a hand.") end
+    return false
+  end
+
+  -- Get the token owner's color
+  local tokenColor = 'White' --default
+  local name = toTokenObject.getName()
+  for color,eachFaction in pairs(factionsInPlay) do
+      if eachFaction .. ' Command Token' == name then
+        tokenColor = color
+        break
+      end
+  end
+
+  if showDebug then print("Decal applied succesfully!") end
+  _ApplyDecal(tokenColor,toTokenObject)
+  return true
+end
+
+--
+function _TryRemoveDecal(fromToken)
+  if fromToken == nil then return end
+  --Ignore unregistered tokens
+  if not registeredTokens[fromToken.getGUID()] then return end
+
+  -- Remove decal if the token is not on the gameboard(if the object is in a zone)
+  if not _ObjectIsOnGameboard(fromToken) then
+    if showDebug then print("Token is in zones - removing decal") end
+    _RemoveDecal(fromToken)
+    return
+  end
+
+    if fromToken.held_by_color then
+      if showDebug then print("Token is being held - removing decal.") end
+      _RemoveDecal(fromToken)
+      return
+    end
+end
+
+--- Removes the object from registry table and removes decal
+function _RemoveDecal(fromObject)
+  local id = fromObject.getGUID()
+  --[[
+  if not registeredTokens[id] then
+    if showDebug then print("Cannot remove decal from unregistered token.") end
+    return
+  end
+  --]]
+  registeredTokens[id] = nil
+  fromObject.setDecals({})
+end
+
+--
+function _ApplyDecal(color, toObject)
+  local id = toObject.getGUID()
+  if registeredTokens[id] then return end
+
+  registeredTokens[id] = toObject
+
+  local objScale = toObject.getScale()
+
+  local bounds = toObject.getBounds()
+  local centerY = bounds.offset.y / objScale.y
+  local bottomY = centerY - bounds.size.y / objScale.y / 2
+
+  local ICON_SIZE = { [true] = 1.25, [false] = 1.5 }
+  local w = ICON_SIZE[FLAT_ICONS] / objScale.x
+  local h = ICON_SIZE[FLAT_ICONS] / objScale.z
+
+  if not FLAT_ICONS then
+    local TILT_POS_OFFSET = 0.08
+    local TILIT_ANGLE = 8
+    local positions = {
+      pos_Front = {
+        x = 0,
+        y = bottomY - 0.6,
+        z = 0 - TILT_POS_OFFSET
+      },
+      pos_Back = {
+        x = 0,
+        y = bottomY - 0.6,
+        z = 0 + TILT_POS_OFFSET
+      },
+      pos_Left = {
+        x = 0 - TILT_POS_OFFSET,
+        y = bottomY - 0.6,
+        z = 0
+      },
+      pos_Right = {
+        x = 0 + TILT_POS_OFFSET,
+        y = bottomY - 0.6,
+        z = 0
+      }
+    }
+    toObject.setDecals({
+        {
+            name     = 'ShipsideUp_Front',
+            url      = ICON_URLS[color],
+            position = positions.pos_Front,
+            rotation = { x = -TILIT_ANGLE, y = 0, z = -180 },
+            scale    = { x = ICON_SIZE[FLAT_ICONS], y = ICON_SIZE[FLAT_ICONS], z = ICON_SIZE[FLAT_ICONS] }, -- w, h in world units
+        },
+        {
+            name     = 'ShipsideUp_Back',
+            url      = ICON_URLS[color],
+            position = positions.pos_Back,
+            rotation = { x = -TILIT_ANGLE, y = 180, z = -180 },
+            scale    = { x = ICON_SIZE[FLAT_ICONS], y = ICON_SIZE[FLAT_ICONS], z = ICON_SIZE[FLAT_ICONS] }, -- w, h in world units
+        },
+        {
+            name     = 'ShipsideUp_Left',
+            url      = ICON_URLS[color],
+            position = positions.pos_Left,
+            rotation = { x = -TILIT_ANGLE, y = 90, z = -180 },
+            scale    = { x = ICON_SIZE[FLAT_ICONS], y = ICON_SIZE[FLAT_ICONS], z = ICON_SIZE[FLAT_ICONS] }, -- w, h in world units
+        },
+        {
+            name     = 'ShipsideUp_Right',
+            url      = ICON_URLS[color],
+            position = positions.pos_Right,
+            rotation = { x = -TILIT_ANGLE, y = -90, z = -180 },
+            scale    = { x = ICON_SIZE[FLAT_ICONS], y = ICON_SIZE[FLAT_ICONS], z = ICON_SIZE[FLAT_ICONS] }, -- w, h in world units
+        }
+    })
+  else
+    local LIFT = 0.5 -- 0.1
+    local pos = {
+      x = 0,
+      y = bottomY - LIFT,
+      z = -0.1
+    }
+    toObject.setDecals({
+        {
+            name     = 'ShipsideUp_Flat',
+            url      = ICON_URLS[color],
+            position = pos,
+            rotation = { x = 270, y = 0, z = 0 },
+            scale    = { x = ICON_SIZE[FLAT_ICONS], y = ICON_SIZE[FLAT_ICONS], z = ICON_SIZE[FLAT_ICONS] }
+        }
+      })
+  end
+end
+-----------------------------------------------------
+
+--return t/f
+function _ObjectIsOnGameboard(object)
+  assert(object)
+
+  if systemHelper.systemFromPosition(object.getPosition()) then
+    return true
+  end
+  return false
+end
+
+--return t/f
+function _ObjectIsFaceUp(object)
+
+  local rotation = object.getRotation().z
+  return rotation < 90 and rotation > 270
+end
+
+---Only checks for command tokens of factions in play
+--return t/f
+function _ObjectIsCommandToken(objectNameOrObject)
+  assert(objectNameOrObject)
+  --Get object name
+  local objName = nil
+  if type(objectNameOrObject) =='string' then objName = objectNameOrObject
+  else objName = objectNameOrObject.getName()
+  end
+
+  ---Compare against known factions
+  --TEMPORARY solution to grab on every request
+  factionsInPlay = _GetFactionCommandTokens()
+  if factionsInPlay == nil or next(factionsInPlay) == nil then --if nil or empty
+    if showDebug then print("Factions not determined; cannot identify object as token.")end
+    return false
+  end
+  for _, faction in pairs(factionsInPlay) do
+    local matchString = faction .. ' Command Token'
+    --if showDebug then print("Trying string: -" .. matchString .. "- against -" .. objName .."-") end
+    if objName == matchString then
+      if showDebug then print("Identified token.") end
+        return true
+    end
+  end
+  if showDebug then print("Could not identify object as token.") end
+  return false
+end
+
+--return empty table or table of {color, faction.tokenName}
+function _GetFactionCommandTokens()
+  local allColors = Player.getAvailableColors()
+  local factionsTable = factionHelper.allFactions(false)
+  local factions = {}
+
+  for _,eachColor in pairs(allColors) do
+    if eachColor ~= 'Grey' and eachColor ~= 'Black' and eachColor ~= 'Teal' then
+      factions[eachColor] = factionsTable[eachColor] and factionsTable[eachColor].tokenName
+    end
+  end
+
+  return factions
+end

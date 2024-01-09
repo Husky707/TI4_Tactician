@@ -1,0 +1,844 @@
+
+--Any params you ommit will be set to the default values listed below:
+local DEFAULT_SETTINGS = {
+  --rollDelay and cleanupDelay are for all dice in the roll(not individually overridalbe)
+  rollDelay = 2,
+  cleanupDelay = 2, --min 0
+
+  color = { r = 0, g = 0, b =0 },
+  rollTarget = nil, --(dice only) If proveded, the die's facing will be stored as follows: result = {[rollTarget] = facing}
+
+  --Sets a unique position for a die, or the anchor position for a group of dice
+  rollPosition = nil,-- if nil, the dice will be rolled near this helper object or near your defaultParams position
+  --If dice are not given a unique position, they are placed in a grid that is anchored at the default roll position
+  gridColumns = 5 --used for arranging dice that were not given a 'position' field into a grid around the default posistion
+}
+
+--Use this table as the model for your paramiters
+--Any or all fields can be omitted
+local ROLL_PARAMITERS = {
+  --Min = 1, max = 60
+  count = 1, --If omitted, count will be set to 1
+  key = nil, --defaults to nil. Give this roll an identifier that you can track in your script
+  --When you call a roll function, it will return a unique rollId, either are useful for tracking rolls
+
+  --Where and with what attributes do you want your dice rolled?
+  --Both fields below are a table, or tables of DEFAULT_SETTINGS (detailed above)
+  defaultSettings = nil, --if nil, will use DEFAULT_SETTINGS listed above.
+  --If uniqueParams is omitted, all dice will use the params from the defualt field
+  uniqueSettings = nil, --A table of DEFAULT_SETTINGS to apply to each dice that you want to be unique
+                      --Each field missing is set to the value in defaultParams
+
+  --Include these fields if you wish for this script to call a function upon completion of the roll.
+  caller = nil, --self, --should point to the object that contains the function you wish to call
+  functionName = "NAME", --string of the functionName
+  params = nil --OPTIONAL Talbe{}. params you list here will be compied and added to the table that is given passed to the function
+  --This script will pass a single table as the only paramiter to the function you provide.
+  --That table will be a combination of the fields passed in this params table, and the fields for the results.
+  --See "How to read the rollResult" below for what exactly included in the table
+}
+------------------------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------------------------
+---Setting the paramiters for a roll:
+
+---How to get the results of your roll:
+    --You can get the results of a roll by providing a callback function or by calling getResult(rollID)
+      --getResult(rollID): (NOT RECOMENDED, but available)
+          --returns nil if the roll is still in progress
+          --The rollID of your roll is returned by all roll functions when you call them. See example:
+            -- local newRollID = rollADie(rollParams, optionalRollKey = nil, optionalCallback = nil)
+            -- local result = Wait.time(function() return diceHelper.getResult(newRollID) end, 6)
+      --Providing a callback: (RECOMENDED)
+          --The roll will call your callback function if you provide the following fields in the paramiter table
+            --caller = self -- Should point to the object that has the function you want to call
+            --functionName = "NAME" -- String matching the function's name
+            --params = {} --OPTIONAL. Table of additional params for your provided function.
+          --IMPORTANT!: The results of the roll and the additional params you provided will be copied and combined into
+          --the table that is passed as the paramiters to your function
+        --}
+    --results are not saved across loads, but persist for the duration of play
+
+---How to read the rollResult:
+    --The results of a roll are passed using the following signiture:
+    --roll = {
+        --key = nil or the key you provided when you called the roll function,
+        --id = int, this value was returned by the roll function when you called it
+        --result = the facing of the die, or a table of the facings: 5 or { [rollTarget] = 4, 7, 1,...}
+                  --If you give a die a rollTarget, its result will be indexed by that value: {[rollTarget] = dieFacing }
+        --details = {} table of individual dice data. For example, you can get the dice color, position, or rollTarget
+        --optionalParam1 = ? --If you pass a table of params as part of your callbackData, they will be added as a field (tables are copied)
+        --optionalParam2...
+    --}
+
+--[[Copy/Paste example:
+local rollParams = {
+    count = 3,
+    defaultSettings = { position = self.getPosition() },
+    uniqueSettings = nil, --Maybe make each color or position unique? You would assign rollTargets here too
+    caller = self,
+    functionName = "_onRollComplete"
+}
+local diceRoll = diceHelper.rollSomeDice(rollParams)
+function _onRollComplete(rollData)
+  local hitVal = 5
+  for _,roll in pairs(rollData.result) do
+    if roll >= hitVal then print("Hit on a " .. roll) end
+  end
+end--]]
+
+--returns@ a unique rollID
+function rollADie(params)
+  return _onNewRollRequest(1, params)
+end
+
+--
+function rollSomeDice(params)
+  local count = params.count or 1
+  return _onNewRollRequest(count, params)
+end
+
+--Useful if you do not want to provide a callback
+--Pass the rollID returned by the rollFunction you called
+--Results are not saved between loads
+--returns nil while the roll is in progress or the result. See above for result table format
+function getResult(rollID)
+  return _onGetResultRequest(rollID)
+end
+------------------------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------------------------
+
+local _poolIndex = 1
+local _poolInitSize = 25
+local _poolLocation = { x = 10, y = -12, z = -10}
+local _dicePool = {} -- { {available = true, object = obj, index = itsPoolIndex}}
+
+local _rollArea = { x = self.getPosition().x, y = self.getPosition().y + 5, z = self.getPosition().z - 2}
+
+--copyTable(rollData[rollID]) is what the user will receive
+local rollData = {} -- { ['rollID'] = {
+  --result = # or table of #s. If you provide a 'rollTarget' field for a die, that will be used as the result key: {['rollTarget'] = result}
+  --data = table of diceData tables. Contains the settings and params of each die used (useful for getting dice color and position, etc.)
+  --count = #,
+  --rollSettings = ROLL_PARAMITERS.defaultSettings combined with DEFAULT_SETTINGS
+  --id = #, returned by the roll function
+  --key = nil, --
+
+  --waiting = true,
+  --caller = nil,
+  --callback = nil,
+  --any fields given in callbackParams table will be added as fields to this rollData
+  --dice = {diceData ids} used internally to track match diceData to its diceObject -- Removed from results
+--}
+
+local diceData = {} -- { ['dieID'] =
+--{
+  --facing = -1, --Once available, facing can be used to get the die's rolled result
+  --settings =
+      --[[{
+        rollTarget = nil, If assigned, this die's facing will be stored in the result table as {['rollTarget'] = facing}
+        color,
+        rollPosition
+      --]]
+  --rolling = false, --removed from result
+  --object = obj} -- the die object used for the roll --removed from result
+--}
+
+local showDebug = false
+local printDice = false
+---------------------------------------------------------
+
+--Save to track currently active dice for disposal on load
+function onSave()
+  saved_data = ""
+  if _dicePool and next(_dicePool) ~= nil then
+    local guids = {}
+    for _,each in pairs(_dicePool) do
+      table.insert(guids, each.object.getGUID())
+    end
+
+    saved_data = JSON.encode(guids)
+  end
+  return saved_data
+end
+
+function onLoad(saveState)
+  --Loads the save of any active dice and deletes them
+  if saveState ~= "" then
+      local loaded_data = JSON.decode(saveState)
+      for _, guid in ipairs(loaded_data) do
+          local obj = getObjectFromGUID(guid)
+          if obj ~= nil then
+              destroyObject(obj)
+          end
+      end
+  end
+
+  DEFAULT_SETTINGS.rollPosition = _rollArea
+  Wait.Frames(function() _initPool(_poolInitSize) end, 10)
+end
+
+function onDestroy()
+  _deleteDice()
+end
+
+function onDrop(player_color)
+  if player_color ~= 'Black' then _deleteDice() end
+  _setRollArea()
+end
+
+function onObjectEnterContainer(container, enter_object)
+  if enter_object ~= self then return end
+  _deleteDice()
+end
+
+---------------------------------------------------------
+----Perform the rolls
+
+--returns id for the new roll
+function _onNewRollRequest(diceCount, rollParams)
+  if not rollParams then rollParams = {} end
+  local count =  (diceCount > 0 and diceCount <= 60) and diceCount or 1
+  if showDebug then print("_______________\nRolling " .. count .. " dice...") end
+
+  --generate rollData
+  local newID = _getNewRollID()
+  local callbackData = {caller = rollParams.caller, functionName = rollParams.functionName, params = rollParams.params and copyTable(rollParams.params)}
+  rollData[newID] = _generateRollData(newID, count, rollParams.key, callbackData)
+  --grather dice
+  local diceIds = {}
+  for i = 1, count, 1 do
+    table.insert(diceIds, _getDie())
+  end
+
+  rollData[newID].dice = diceIds
+  _setRollSettings(newID, rollParams.defaultSettings)
+  _setDiceSettings(diceIds, rollParams.uniqueSettings, rollParams.defaultSettings)
+  _setRollPositions(newID, rollParams.uniqueSettings)
+
+  _beginRollProcess(newID)
+
+  return newID
+end
+
+--Sets the dice, then rolls them after the roll delay is completed
+function _beginRollProcess(rollID)
+  if not rollData[rollID] or not rollData[rollID].dice then
+    if showDebug then print("Error begining roll process.") end
+    return
+  end
+  if showDebug then print("--Begining roll process...") end
+
+  if showDebug then print("Gethering dice") end
+  --Set dice to roll position with Color
+  for _,eachRef in pairs(rollData[rollID].dice) do
+    if diceData[eachRef] then
+      --if showDebug then print("Prepping die") end
+      local data = diceData[eachRef]
+      data.object.setLock(false)
+      data.object.setColorTint(data.settings.color)
+      data.object.setPosition(data.settings.rollPosition)
+      data.object.setRotationValue(math.random(10))
+      data.object.addTorque(_getRandomRotation(), 3)
+      data.object.setLock(true)
+    else
+      if showDebug then print("Invalid die, cannot setup.") end
+    end
+  end
+  --begin roll countdown
+  if showDebug then print("Waiting to begin roll...") end
+  local paramDelay = rollData[rollID].rollSettings.rollDelay or DEFAULT_SETTINGS.rollDelay
+  local wait = paramDelay > 0 and paramDelay or 0.01
+  Wait.time(function() _rollDice(rollID) end, wait)
+end
+
+--returns nothing
+--Updates rollData and rollResults with the results
+--then cleans up dice and gives callback if able
+function _onRollComplete(rollID)
+  if showDebug then print("----Roll " .. rollID .. " has completed.") end
+  --add results to the roll roll data
+  if not rollData[rollID] then
+    if showDebug then print("Error finding rollData for this roll.") end
+    return
+  end
+
+  --get results
+  local facings = {}
+  local dieDataObjects = {}
+  --rolledDice is assumed to be a table of diceObjects
+  for _,eachDie in pairs(rollData[rollID].dice) do
+    if diceData[eachDie] then
+      table.insert(facings, diceData[eachDie].object.getValue())
+      diceData[eachDie].rolling = false
+      diceData[eachDie].facing = diceData[eachDie].object.getValue()
+      dieDataObjects[eachDie] = diceData[eachDie]
+    else
+      if showDebug then print("Unable to find dice data. Cannot record results.") end
+    end
+  end
+
+  --Save results
+  rollData[rollID].waiting = false
+  rollData[rollID].data = copyTable(dieDataObjects)
+  _formatAndSetRollResults(rollID)
+
+  --Begin cleanup countdown
+  _beginRollCleanup(rollID)
+
+  _sendResults(rollID)
+end
+
+--
+function _sendResults(rollID)
+  if showDebug then print("_______\nReturning results...") end
+  if not rollData[rollID] then
+    if showDebug then print("No data for the roll provided.") end
+    return
+  end
+
+  if rollData[rollID].waiting then
+    if showDebug then print("Nothing  to send: Roll is still waiting.") end
+    return
+  end
+
+  if not rollData[rollID].caller then
+    if showDebug then print("No caller was given.") end
+    return
+  end
+  if not rollData[rollID].callback or type(rollData[rollID].callback) ~= "string" then
+    if showDebug then print("Invalid callback funcion.") end
+    return
+  end
+
+  if showDebug then print("Making the call...")end
+  rollData[rollID].caller.call(rollData[rollID].callback, _packageResult(rollID))
+end
+
+--returns false if the roll is in progress or copy of rollData[rollID]
+function _onGetResultRequest(rollID)
+  if showDebug then print("________\nGetting results for roll " .. rollID) end
+
+  if rollData[rollID] == nil then
+    if showDebug then print("No roll matching this id.") end
+    return nil
+  end
+  if rollData[rollID].waiting then
+    if showDebug then print("Roll in progress - waiting for results...") end
+    return false
+  end
+
+  return _packageResult(rollID)
+end
+
+---------------------------------------------------------
+---Rolling dice
+
+--
+function _rollDice(rollID)
+  if not rollData[rollID] then
+    if showDebug then print("Trying to roll dice for an unknown roll.") end
+    return
+  end
+
+  if printDice then print("_________\nDice roll:")
+    for _,eachRef in pairs(rollData[rollID].dice) do
+       print("_____\nDie " .. eachRef .. ":")
+       printTable(diceData[eachRef].settings)
+    end
+  end
+
+  if not rollData[rollID].dice then print("The roll has no dice assigned.") return end
+  for _, eachRef in pairs(rollData[rollID].dice) do
+    if diceData[eachRef] then
+      diceData[eachRef].object.setLock(false)
+      diceData[eachRef].rolling = true
+      diceData[eachRef].object.randomize()
+    else
+      if showDebug then print("Cannot roll die. Passed an invalid reference to dice data.") end
+    end
+  end
+
+  Wait.time(function() _activateRollMonitor(rollID) end, 1.3)
+end
+
+-------------
+local _monitoringRolls = false
+local _workingRolls = nil -- Table of rollIds
+
+--Calls _onRollComplete when all dice in a roll are resting.
+function _monitorRolls(newRoll)
+  if newRoll then _addRollToWatchList(newRoll) end
+
+  if not _workingRolls or next(_workingRolls) == nil or _monitoringRolls then return end
+  function coroutine_monitorRolls()
+    if showDebug then print("---Begining roll monitoring---") end
+    _monitoringRolls = true
+    repeat
+      for _,eachRollID in pairs(_workingRolls) do
+        local allComplete = true
+        for _, eachDie in pairs(rollData[eachRollID].dice) do
+          if diceData[eachDie].object.resting == false then
+            allComplete = false
+            break
+          end
+        end
+        if allComplete then
+          _onRollComplete(eachRollID)
+          _workingRolls[_] = nil
+        end
+      end
+      coroutine.yield(0)
+    until not _workingRolls or next(_workingRolls) == nil
+    if showDebug then print("---Roll monitor resting---") end
+    _monitoringRolls = false
+    return 1
+  end
+
+  startLuaCoroutine(self, "coroutine_monitorRolls")
+end
+
+--
+function _addRollToWatchList(rollID)
+  if not rollID then return end
+  if _workingRolls then
+    table.insert(_workingRolls, rollID)
+  else
+    _workingRolls = { rollID }
+  end
+end
+
+--
+function _activateRollMonitor(newRoll)
+  --If the monitor is already active, add the roll to the watchlist
+  if _monitoringRolls then
+    _addRollToWatchList(newRoll)
+    return
+  end
+  --Otherwise begin monitoring
+  _monitorRolls(newRoll)
+end
+
+--
+function _getRandomRotation()
+    --Credit for this function goes to Revinor (forums)
+    --Get 3 random numbers
+    local u1 = math.random()
+    local u2 = math.random()
+    local u3 = math.random()
+    --Convert them into quats to avoid gimbal lock
+    local u1sqrt = math.sqrt(u1)
+    local u1m1sqrt = math.sqrt(1-u1)
+    local qx = u1m1sqrt *math.sin(2*math.pi*u2)
+    local qy = u1m1sqrt *math.cos(2*math.pi*u2)
+    local qz = u1sqrt *math.sin(2*math.pi*u3)
+    local qw = u1sqrt *math.cos(2*math.pi*u3)
+    --Apply rotation
+    local ysqr = qy * qy
+    local t0 = -2.0 * (ysqr + qz * qz) + 1.0
+    local t1 = 2.0 * (qx * qy - qw * qz)
+    local t2 = -2.0 * (qx * qz + qw * qy)
+    local t3 = 2.0 * (qy * qz - qw * qx)
+    local t4 = -2.0 * (qx * qx + ysqr) + 1.0
+    --Correct
+    if t2 > 1.0 then t2 = 1.0 end
+    if t2 < -1.0 then ts = -1.0 end
+    --Convert back to X/Y/Z
+    local xr = math.asin(t2)
+    local yr = math.atan2(t3, t4)
+    local zr = math.atan2(t1, t0)
+    --Return result
+    return {math.deg(xr),math.deg(yr),math.deg(zr)}
+end
+
+---------------------------------------------------------
+----Create data tables
+
+--Creates the table for the roll and that roll's callback if valid
+--does not add the dice result (because it is not available yet)
+--returns the rollData[rollID] table
+function _generateRollData(rollID, diceCount, rollKey, callbackData)
+  if showDebug then print("--Generating data table for roll " .. rollID) end
+  local newData = {
+    count = diceCount,
+    waiting = true,
+    id = rollID,
+    key = rollKey
+  }
+  if _validateCallback(callbackData) then
+    newData.caller = callbackData.caller
+    newData.callback = callbackData.functionName
+    if callbackData.params and next(callbackData.params) then
+        for key,eachValue in pairs(callbackData.params) do
+          newData[key] = eachValue
+        end
+    end
+  end
+
+  return newData
+end
+
+--
+function _setRollSettings(rollID, callerSettings)
+  if not rollData[rollID] then
+    if showDebug then print("Cannot set params for a roll that is not registered.") end
+    return
+  end
+  if showDebug then print("--Getting roll settings.") end
+
+  local defaults = _combineSettings(callerSettings, DEFAULT_SETTINGS)
+  rollData[rollID].rollSettings = copyTable(defaults) --Uncopy
+  rollData[rollID].rollSettings.rollTarget = nil --Explicitly ensure the roll has no target
+end
+
+--
+function _generateDieData(diceObject)
+  if not diceObject then return end
+  local newData = {
+    object = diceObject,
+    rolling = false,
+    facing = -1
+    --Settings will be added later in _setDiceSettings
+  }
+
+  return newData
+end
+
+--
+function _setDiceSettings(diceIds, overrides, default)
+  if not diceIds or type(diceIds) ~= 'table' then return end
+  if showDebug then print("--Setting up dice...") end
+  --create params
+  local defaultParams = _combineSettings(default, DEFAULT_SETTINGS)
+  local uniqueParams = nil
+  --uniqueParams field is a table of modified DEFAULT_SETTINGS tables.
+  if overrides and type(overrides) == 'table' then
+    if showDebug then print("Overrides detected.")end
+    uniqueParams = {}
+    for _, each in pairs(overrides) do
+      table.insert(uniqueParams, copyTable(_combineSettings(each, defaultParams)))
+    end
+  end
+  --Give params to data
+  local overrideCount = uniqueParams and #uniqueParams or 0
+  local counter = 1
+  for _,each in pairs(diceIds) do
+    if diceData[each] then
+      --Give dice the unique params until they have all been assigned - then give defaults
+      diceData[each].settings = counter <= overrideCount and copyTable(uniqueParams[counter]) or copyTable(defaultParams)
+      counter = counter + 1
+      --if showDebug then print("Dice " .. each .. " settings generated.") end
+    else
+      if showDebug then print("Cannot set params for unregistered dice.") end
+    end
+  end
+end
+
+--
+function _combineSettings(overrideParams, defaultSettings)
+  local default = defaultSettings == DEFAULT_SETTINGS and DEFAULT_SETTINGS or _combineSettings(defaultSettings, DEFAULT_SETTINGS)
+
+  local params = copyTable(default)
+  if not overrideParams or next(overrideParams) == nil then return params end
+  for key, val in pairs(overrideParams) do
+      params[key] = type(val) == 'table' and copyTable(val) or val
+  end
+
+  return params
+end
+
+--
+function _validateCallback(callbackData)
+  if not callbackData or type(callbackData) ~= 'table' then
+    if showDebug then print("Callback data was nil or not a table") end
+    return false
+  end
+  if not callbackData.caller then
+    if showDebug then print("Callback did not give their address.") end
+    return false
+  end
+  if not callbackData.functionName or type(callbackData.functionName) ~= 'string' then
+    if showDebug then print("Callback provided an invalid function.") end
+    return false
+  end
+
+   return true
+end
+
+--
+function _formatAndSetRollResults(rollID)
+  if not rollID or not rollData[rollID] then if showDebug then print("Cannot format results for invalid roll.") end return end
+  if showDebug then print("--Formating results...") end
+
+  --Set result for single die to int
+  local result = {}
+  if rollData[rollID].count == 1 then
+    if showDebug then print("One die detected - result set as integer.") end
+    result = diceData[rollData[rollID].dice[1]].facing
+    rollData[rollID].result = result
+    return result
+  end
+
+  --Dice with a rollTarget are set with key: [rollTarget] = facing
+  for _,eachRef in pairs(rollData[rollID].dice) do
+    local die = diceData[eachRef]
+    if die then
+      if die.settings.rollTarget then
+        if result[die.settings.rollTarget] then
+          print("WARNING: Multiple dice sharing a roll target is not supported.")
+        end
+        result[die.settings.rollTarget] = die.facing
+      else
+        table.insert(result, die.facing)
+      end
+    end
+  end
+
+  if showDebug then print("Results set as table.") end
+  rollData[rollID].result = result
+  return result
+end
+
+--Gets the result table that is passed to the caller
+--Removes some fields that are only used internally
+function _packageResult(rollID)
+  if showDebug then print("--Packaging data for sending.") end
+  if not rollData[rollID] then if showDebug then print("Error: Unknown roll data.") end return end
+
+  local clientResult = copyTable(rollData[rollID])
+  clientResult.dice = nil --remove string of internal dice trackers
+  --Remove the references to the physical dice to protect the object pool
+  for _,eachDie in pairs(clientResult.data) do
+    eachDie.object = nil
+    eachDie.rolling = nil
+  end
+
+  return clientResult
+end
+---------------------------------------------------------
+----Cleanup functions
+
+--
+function _beginRollCleanup(rollID)
+  if not rollData[rollID] then print("Cannot cleanup an unregistered roll.") return end
+  if showDebug then print("--Beginning cleanup of roll " .. rollID .. ".") end
+
+  local delaySetting = rollData[rollID].rollSettings.cleanupDelay or DEFAULT_SETTINGS.cleanupDelay
+  local wait = delaySetting > 0 and delaySetting or 0.01
+  Wait.time(function() _cleanupRoll(rollID) end, wait)
+end
+
+--
+function _cleanupRoll(rollID)
+  if not rollData[rollID] then print("Cannot cleanup an unregistered roll.") return end
+  for _,eachRef in pairs(rollData[rollID].dice) do
+    _returnDie(diceData[eachRef].object)
+  end
+  if showDebug then print("Roll " .. rollID .. " cleaned up.") end
+end
+
+--Deletes dice and clears all saved data
+function _deleteDice()
+  if showDebug then print("Deleting dice.") end
+  rollData = {}
+  diceData = {}
+  for _,each in pairs(_dicePool) do
+    each.object.destruct()
+  end
+  _dicePool = {}
+  _poolIndex = 1
+end
+
+---------------------------------------------------------
+----Object pooling
+
+--Finds or spawns an available dice and create an new diceData object for it
+--returns the unique ID to reference the diceData object
+function _getDie()
+  if showDebug then print("--Getting a die from pool...") end
+  if not _dicePool or next(_dicePool) == nil then
+    _initPool(_poolInitSize)
+  end
+  --Search _dicePool for an available die
+    --Begins search at _poolIndex to avoid looping through all dice each call
+  local size = _getTableLength(_dicePool)
+  for searchCount = 0, size, 1 do
+    if _dicePool[_poolIndex] then
+      if _dicePool[_poolIndex].available then
+        --Found an available die
+        _dicePool[_poolIndex].available = false
+        local dieID = _getNewRollID()
+        diceData[dieID] = _generateDieData(_dicePool[_poolIndex].object)
+        _incrementPoolIndex()
+        if showDebug then print("Got die " .. dieID) end
+        return dieID
+      end
+    end
+    _incrementPoolIndex()
+  end
+  --No waiting dice?
+  if showDebug then print("No available dice. Spawning more and trying again.") end
+  _poolIndex = _getTableLength(_dicePool) + 1
+  _spawnDice(5)
+  return _getDie() --watch me infinite loop this
+end
+
+--
+function _returnDie(dieObject)
+  if not _dicePool or not dieObject then return end
+  for _, each in pairs(_dicePool) do
+    if each.object == dieObject then
+      each.available = true
+      _placeDieInPool(each)
+      dieObject.setColorTint(DEFAULT_SETTINGS.color)
+      return
+    end
+  end
+end
+
+--
+function _initPool(minPoolSize)
+  if showDebug then print("--Initializing pool...") end
+
+  if _dicePool == nil then _dicePool = {} end
+  local spawnCount = minPoolSize - _getTableLength(_dicePool)
+  if spawnCount < 1 then return end
+  if showDebug then print("Adding " .. spawnCount.. " dice to pool.") end
+  _spawnDice(spawnCount)
+end
+
+--
+function _spawnDice(count)
+  if count <= 0 then return end
+  if showDebug then print("--Spawning " .. count .. " dice.") end
+
+  local i = _getTableLength(_dicePool) + 1
+  for loop = 0, count do
+    local newDie = spawnObject({
+        type = 'Die_10',
+        position = { x = 30, y = -18, z = -30 }
+    })
+    _dicePool[i] = { available = true, object = newDie, index = i }
+    _placeDieInPool(_dicePool[i])
+    i = i + 1
+  end
+end
+
+function _incrementPoolIndex()
+  _poolIndex = (_poolIndex + 1) <= _getTableLength(_dicePool) and _poolIndex + 1 or 1
+end
+
+---------------------------------------------------------
+---Placement functions
+
+--Sets the params.rollPosition value of each diceData object that is part of this roll
+function _setRollPositions(rollID, overrideSettings)
+  if not rollData[rollID] then if showDebug then print("Cannot set positions for an invalid roll id.") end return end
+  if showDebug then print("--Setting roll positions...") end
+
+  --local positions = {}--table of transforms
+  local default = rollData[rollID].rollSettings.rollPosition or _rollArea
+  local overrides = nil
+  --get any specified positions
+  if overrideSettings and type(overrideSettings) == 'table' and next(overrideSettings) ~= nil then
+    if showDebug then print("Unique positions identified.") end
+    overrides = {}
+    for _,each in pairs(overrideSettings) do
+      if each.rollPosition then
+        table.insert(overrides, copyTable(each.rollPosition))
+      end
+    end
+    if next(overrides) == nil then overrides = nil end
+  end
+
+  --Assign each dice a position
+  --Use overrides first. Any remaining dice are added to a grid
+  local overrideCount = overrides and #overrides or 0
+  local count = overrideCount > 0 and 1 or nil
+  local gridindex = 1
+  for _,eachRef in pairs(rollData[rollID].dice) do
+    local newPos = {}
+    if count and overrides[count] then
+      if showDebug then print("Dice " .. eachRef .. " has a unique position.")end
+      newPos = overrides[count]
+      count = count + 1
+    else
+      if showDebug then print("Dice " .. eachRef .. " has a grid position.") end
+      newPos = _getGridPosition(default, gridindex, rollData[rollID].rollSettings.gridColumns)
+      gridindex = gridindex + 1
+    end
+      diceData[eachRef].settings.rollPosition = newPos
+  end
+end
+
+--
+function _getGridPosition(originPos, index, columns)
+  assert(originPos.x and originPos.y and originPos.z, "Origin is not a position")
+  assert(type(index) == 'number', "Index is not a number.")
+  assert(type(columns) == 'number', "Columns not defined.")
+
+  local newPos = copyTable(originPos)
+  local spacing = 1.25
+  return { z = newPos.z - (math.floor((index - 1)/columns) * spacing), y = newPos.y, x = newPos.x + (((index - 1) %columns) * spacing) }
+end
+
+--
+function _placeDieInPool(poolRef)
+  local obj = poolRef.object
+  obj.setPosition(_getGridPosition(_poolLocation, poolRef.index, 10))
+  obj.interactable = false
+  obj.setLock(true)
+end
+
+function _setRollArea()
+  _rollArea = { x = self.getPosition().x, y = self.getPosition().y + 5, z = self.getPosition().z - 2}
+end
+
+---------------------------------------------------------
+----Helpers
+
+--
+local _ids = 0
+function _getNewRollID()
+  _ids = _ids + 1
+  return _ids
+end
+
+function _getTableLength(table)
+  if not table or type(table) ~= 'table' or next(table) == nil then return 0 end
+  local len = 0
+  for _, each in pairs(table) do
+    len = len + 1
+  end
+  return len
+end
+
+function copyTable(t)
+    if t and type(t) == 'table' then
+        local copy = {}
+        for k, v in pairs(t) do
+            copy[k] = type(v) == 'table' and copyTable(v) or v
+        end
+        t = copy
+    end
+    return t
+end
+
+function printTable(table)
+  if not table or type(table) ~= 'table' then print("Error: printTable() requires a table param.") return end
+
+  local function typeToPrintable(input)
+   if type(input) == 'boolean' then return input and "true" or "false" end
+   if type(input) == 'userdata' then return "userData" end
+   return input
+  end
+
+  for k,v in pairs(table) do
+    local kString = typeToPrintable(k)
+    if type(v) == 'table' then
+      print("--" .. kString .. " table:")
+      printTable(v)
+    else
+      print(kString .. ": " .. typeToPrintable(v))
+    end
+  end
+end

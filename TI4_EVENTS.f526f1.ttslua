@@ -1,0 +1,162 @@
+local showDebug = false
+--------------------
+--[[Copy/paste common use case:
+
+--Paste at top of file
+function getHelperClient(helperObjectName)
+    local function getHelperObject()
+        return Global.call('getHelper', helperObjectName)
+
+    end
+    local helperObject = false
+    local function getCallWrapper(functionName)
+        helperObject = helperObject or getHelperObject()
+        if not helperObject.getVar(functionName) then error('missing ' .. helperObjectName .. '.' .. functionName) end
+        return function(parameters) return helperObject.call(functionName, parameters) end
+    end
+    return setmetatable({}, { __index = function(t, k) return getCallWrapper(k) end })
+end
+
+local events = getHelperClient("TI4_EVENTS")
+
+function onLoad(save_state)
+  events.addListener({eventName = "exampleEvent", objGUID = self.getGUID()})
+end
+
+--your callback function cannot have the 'local' scope
+function onExampleEvent(params)
+  print("Got evnet notification!")
+  --run your code
+end
+
+--exampleEvent isn't called by other functions
+--drop this object to invoke the event
+function onDrop(player_color)
+  events.invoke({eventName = "exampleEvent"})
+end
+
+--]]
+------------------------------------------------------------------------------------------------------------------------
+--List of built in game events and where they are Called
+--You can create your own events using createEvent(params). See below for details
+local events =
+{
+  ["exampleEvent"] =
+  {
+    listeners = {}, --{ [guid] = { listenObject = obj, callback = string name of function }, }
+    defaultCallback = "onExampleEvent"
+  }
+}
+
+------------------------------------------------------------------------------------------------------------------------
+--Public methods: addListener, removeListener, invoke, newEvent
+--Interact with the event system here
+
+--[[params:
+    eventName = string name of target event,
+    objGUID = guid of the listening object that contains the callback function,
+    callback = *optional- string name of callback function. Defaults to "on" .. EventName ex: turnStart -> onTurnStart (notice capitalization!!)--]]
+    --p: ({eventName, objGUID, callback})
+function addListener(params)
+  assert(params.eventName and type(params.eventName) == 'string')
+  assert(params.objGUID and type(params.objGUID) == 'string')
+  if params.callback then assert(type(params.callback) == 'string', "Callback should be the string name of your callback function. Ommitting defaults to onEventName.") end
+
+  local event = events[params.eventName]
+  local guid = params.objGUID
+  local obj = getObjectFromGUID(guid)
+  assert(event, params.eventName .. " is not a registered event.")
+  assert(obj, "To listen to an event, you must provide the valid guid of the listening object")
+
+  local currentListeners = event.listeners or {}
+  if currentListeners[guid] then return false end--prevent listener douplication
+  --determine callback function
+  local cb = params.callback or event.defaultCallback
+  currentListeners[guid] = { listenObject = obj, callback = cb }
+  event.listeners = currentListeners
+
+  if showDebug then print(obj.getName() .. " is now listening to " .. params.eventName) end
+  return true
+end
+
+--Params: {eventName, objGUID}
+function removeListener(params)
+  assert(params.eventName and type(params.eventName) == 'string')
+  assert(params.objGUID)
+
+  assert(events[params.eventName], "Tried to remove listener from an unregistered event.")
+  events[params.eventName].listeners[params.objGUID] = nil
+end
+
+--params: {eventName, eventParams}
+function invoke(params)
+  assert(params.eventName and type(params.eventName) == 'string')
+  assert(events[params.eventName], "Tried to invoke an event that does not exist.")
+  local listeners = events[params.eventName].listeners
+  if not next(listeners) then return end
+
+  --call events. Mark nil objects for removal
+  if showDebug then print("Invoking " .. params.eventName .. ".") end
+  local nilObjs = {}
+  for id,each in pairs(listeners) do
+    if each.listenObject then
+      each.listenObject.call(each.callback, params.eventParams)
+    else
+      table.insert(nilObjs, id)
+    end
+  end
+
+  --remove nil refs
+  for _,each in pairs(nilObjs) do
+    listeners[each] = nil
+  end
+end
+
+--params: {eventName, callbackName(optional-- defaults to "onEventName")}
+function createEvent(params)
+    local function _firstToUpper(str)
+      return (str:gsub("^%l", string.upper))
+    end
+  assert(params.eventName and type(params.eventName) == 'string')
+  assert(params.callbackName == nil or type(params.callbackName) == 'string')
+  local callback = params.callbackName or "on".._firstToUpper(params.eventName)
+
+  if events[params.eventName] then
+    print(params.eventName .. " already exists. Choose a unique name.")
+    return false
+  end
+  --print("Callbackname: >" .. callback .."<")
+  events[params.eventName] = { listeners = {}, defaultCallback = callback}
+  if showDebug then print("Event created: " .. params.eventName  .. " calls>" .. callback .."<") end
+  return true
+end
+
+-------------------------------------------------------------------------------
+function onLoad(saveState)
+    self.setColorTint({ r = 0.25, g = 0.25, b = 0.25 })
+    self.setScale({ x = 2, y = 0.01, z = 2 })
+    self.setName('TI4_EVENTS')
+    self.setDescription('Shared helper functions used by other objects, PLEASE LEAVE ON TABLE! This object is only visible to the black (GM) player.')
+
+    -- Only the GM/black player can see this object.  Others can still interact!
+    local invisibleTo = {}
+    for _, color in ipairs(Player.getColors()) do
+        if color ~= 'Black' then
+            table.insert(invisibleTo, color)
+        end
+    end
+    if not showDebug then
+    self.setInvisibleTo(invisibleTo)
+  end
+end
+-------------------------------------------------------------------------------
+-- @author Darrell
+
+local _lockGlobalsMetaTable = {}
+function _lockGlobalsMetaTable.__index(table, key)
+    error('Accessing missing global "' .. tostring(key or '<nil>') .. '", typo?', 2)
+end
+function _lockGlobalsMetaTable.__newindex(table, key, value)
+    error('Globals are locked, cannot create global variable "' .. tostring(key or '<nil>') .. '"', 2)
+end
+setmetatable(_G, _lockGlobalsMetaTable)
