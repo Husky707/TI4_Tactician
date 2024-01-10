@@ -77,6 +77,8 @@ local AnimClip = {}
 local ToggleButton = {}
 local MultiRoller = {} --logic responible for responding to roll requests
 local Invasion = {} --Handles the more complex invasion UI
+local Plasma = { enabled = false, visible = false, target = false}
+local PShield = {enabled = false, visible = false, status = {}}
 local Planets = { --Handles the planet UI, closely connected to Invasion
   layouts = { --planet count to transforms
     [0] = {},
@@ -136,6 +138,7 @@ local Tac = {
     ["NewActivePlayer"] = function() return "NewActivePlayer" end,
     ["StartActionPhase"] = function() return "StartActionPhase" end,
     ["EndActionPhase"] = function() return "EndActionPhase" end,
+    ["EndOfTacticalAction"] = function() return "EndOfTacticalAction" end,
     ["PlayerTurnStart"] = function() return "PlayerTurnStart" end,
     ["SystemActivated"] = function() return "SystemActivated" end,
     ["PlayerPassed"] = function() return "PlayerPassed" end,
@@ -1714,7 +1717,7 @@ ui.generateXML = function(callback)
         active = false,
         interactable = false,
 
-        onClick = self.getGUID() .. "/onSmartButtonClicked"
+        onClick = self.getGUID() .. "/onSmartButtonClicked_AutoResolve"
       },
       children = {
         {--Icon
@@ -1742,7 +1745,7 @@ ui.generateXML = function(callback)
         active = false,
         interactable = false,
 
-        onClick = self.getGUID() .. "/onSmartButtonClicked"
+        onClick = self.getGUID() .. "/onSmartButtonClicked_AutoResolve"
       },
       children = {
         {--Icon
@@ -1939,7 +1942,7 @@ ui.generateXML = function(callback)
               transition = "SpriteSwap",
               width = 128.0 * 0.85,
               height = 106.0 * 0.85,--112
-              onClick = self.getGUID().. "/onQuickRollBombardment("..i..")",
+              onClick = self.getGUID().. "/onQuickRollBombardment()",
               offsetXY = "".. -221 .." ".. (-62 * 0.8),
               interactable = false,
               active = false,
@@ -1955,7 +1958,7 @@ ui.generateXML = function(callback)
               transition = "SpriteSwap",
               width = 128.0 * 0.85,
               height = 106.0 * 0.85,
-              onClick = self.getGUID().. "/onQuickRollSpaceCannonDef("..i..")",
+              onClick = self.getGUID().. "/onQuickRollSpaceCannonDef()",
               offsetXY = "".. 221 .." "..(-62 * 0.8),
               interactable = false,
               active = false,
@@ -1996,9 +1999,7 @@ ui.generateXML = function(callback)
         }
       }
       ui.insertXml(planet, "Pnl_InvasionHex_Lower")
-      Planets.shieldUI[i] = {active = false, enabled = 0, override = 0}
-      Planets.shieldStatus[i] = {enabled = 0, override = 0}
-      --Generate shield UI
+      PShield.status[i] = {enabled = 0, override = 0, visible = 0}
     end
   end
   planets()
@@ -2536,6 +2537,11 @@ Tac.onGameEvent = function(event, params)
     end)
   end
 
+  --params = {activePlayer, system}
+  local function resolveEndOfTacticalAction()
+
+  end
+
   local function resolvePlayerPassed()
     if not Tac.isActionPhase then return end
 
@@ -2564,7 +2570,9 @@ Tac.onGameEvent = function(event, params)
   --triggered when the last active/passed token has been flipped
   local function resolveEndActionPhase()
     Tac.isActionPhase = false
-    Tac.setState(Tac.eStates.Main(), params)
+    ActivePlayer.prevSystem = nil
+    ActivePlayer.system = nil
+    Tac.setState(Tac.eStates.Main(), params, function() Tac.setColor("Grey") end)
   end
 
   --expects params: {color, prev, skipAnimation = bool}
@@ -2604,12 +2612,13 @@ Tac.onGameEvent = function(event, params)
 
   local function resolveUnitMapUpdated()
     ui.setSmartButtonColors(true)
-    Planets.updateShields()
+    PShield.update()
   end
 
   local switch = { --Each key coresponds to an entry in: Tac.eGameEvents
     ["StartActionPhase"] = resolveStartActionPhase,
     ["EndActionPhase"] = resolveEndActionPhase,
+    ["EndOfTacticalAction"] = resolveEndOfTacticalAction,
     ["NewActivePlayer"] = resolveNewActivePlayer,
     ["PlayerTurnStart"] = resolvePlayerTurnStart,
     ["SystemActivated"] = resolveSystemActivated,
@@ -2823,6 +2832,7 @@ Invasion.reset = function()
   --update active system data
   Invasion.setState(Invasion.eStates.Overview())
   Invasion.setActive(Tac.State == Tac.eStates.Invasion())
+  Plasma.setTarget("default")
 end
 
 Invasion.setActive = function(activate, skipAnimation)
@@ -2843,10 +2853,10 @@ Invasion.setActive = function(activate, skipAnimation)
     ui.batchSet("p"..i.."_ColorRing", {active = activate and i <= pCount or false, interactable = activate and i <= pCount or false})
     ui.batchSet("p"..i.."_QuickBombard", {active = activate and i <= pCount or false, interactable = activate and i <= pCount or false})
     ui.batchSet("p"..i.."_QuickPDS", {active = activate and i <= pCount or false, interactable = activate and i <= pCount or false})
-    local hasShield = Planets.shieldStatus[i] and Planets.shieldStatus[i].enabled ~= 0 or false
-    ui.batchSet("p"..i.."_Btn_shieldOverride", {active = hasShield, interactable = hasShield})
   end
 
+  Plasma.setEnabled(activate)
+  PShield.setEnabled(activate, activate)
   if activate then
     --first time opening for this system? Build the system
     if not Planets._displayedSystem or (Planets._displayedSystem and Planets._displayedSystem ~= ActivePlayer.system) then
@@ -2885,10 +2895,7 @@ Invasion.openState = function(state, params)
     Invasion.setContext(state)
     ui.batchSet("SmartBtn_Bombardment", {color = ActivePlayer.color or "Grey"})
 
-    for i = 1, 5, 1 do --reset shield overrides
-      Planets.setShieldStatus(i)
-    end
-    Invasion.updatePlasmaUI(true)
+    Plasma.setShowing(true)
   end
 
   local function openCombat()
@@ -2920,10 +2927,7 @@ Invasion.closeActiveState = function(params)
 
   local function closeBombardment()
     ToggleButton.setState(ToggleButton.btns["Btn_BombardmentMode"], false)
-    for i = 1, 5, 1 do --reset shield overrides
-      Planets.setShieldStatus(i)
-    end
-    Invasion.updatePlasmaUI(false)
+    Plasma.setShowing(false)
     --Handle bombardment helper
   end
 
@@ -2943,6 +2947,7 @@ Invasion.closeActiveState = function(params)
   switch[try]()
 end
 
+--unimplemetned
 Invasion.onSystemActivated = function()
   if not Invasion.active then return end
 
@@ -3079,62 +3084,6 @@ Invasion.animator = false
 Invasion.animateOrbitals = function(orbit, reverse)
 end
 
-Invasion.updatePlasmaUI = function(setActive)
-  local function disablePS()
-    for i = 1, 5, 1 do
-      ui.batchSet("p"..i.."_Btn_PlasmaScoring", { active = false, interactable = false, isOn = false})
-    end
-    Planets.plasmaTarget = false
-    return
-  end
-  if not setActive then disablePS() return end
-  --else
-
-  if not Invasion.active or Invasion.State ~= Invasion.eStates.Bombardment() then return end
-  local modifiers = _getColorToUnitModifiers() or {}
-  local hasPlasmaScoring = false
-  for _, modifier in ipairs(modifiers[ActivePlayer.color] or {}) do
-      if modifier == 'Plasma Scoring' then
-          hasPlasmaScoring = true
-          break
-      end
-  end
-  if not hasPlasmaScoring then disablePS() return end
-
-  local _firstOtherPlanet = Planets.plasmaTarget == false --only asign default if we dont have an existing target
-  local planets = ActivePlayer.system and ActivePlayer.system.planets or {}
-  for i,eachPlanet in ipairs(planets) do
-    local _isOn = _firstOtherPlanet and Planets.getOwnerColor(eachPlanet.name, planets) ~= ActivePlayer.color
-    if _isOn then
-      _firstOtherPlanet = false
-      Planets.plasmaTarget = i
-    end
-
-    ui.batchSet("p"..i.."_Btn_PlasmaScoring", { active = true, interactable = true, isOn = _isOn,
-      sprite = _isOn and "Icon_PlasmaScoring_Active" or "Icon_PlasmaScoring",
-      --highlightedSprite = "Icon_PlasmaScoring_Hover",
-      pressedSprite = _isOn and "Icon_PlasmaScoring" or "Icon_PlasmaScoring_Active",
-    })
-  end
-end
-
---set planetIndex = nil to remove any target
-Invasion.setPlasmaTarget = function(planetIndex)
-  local target = (not planetIndex or planetIndex == Planets.plasmaTarget) and -1 or planetIndex
-  target = target <= 5 and target or -1
-
-  Planets.plasmaTarget = target > 0 and target or false
-  if not Invasion.active or Invasion.State ~= Invasion.eStates.Bombardment() then return end
-  for i = 1, 5, 1 do
-    ui.batchSet("p"..i.."_Btn_PlasmaScoring", {
-      isOn = i == target,
-      sprite = i == target and "Icon_PlasmaScoring_Active" or "Icon_PlasmaScoring",
-      --highlightedSprite = "Icon_PlasmaScoring_Hover",
-      pressedSprite = i == target and "Icon_PlasmaScoring" or "Icon_PlasmaScoring_Active",
-    })
-  end
-end
-
 --target = #index or string name of xml planet id {p1, p2,... p5}
 --fromSystem defaults to the active system
 Planets.getName = function(target, fromSystem)
@@ -3201,6 +3150,7 @@ end
 Planets.getOwnerColor = function(indexOrName, pTable)
   local function nameFromIndex()
     pTable = pTable or (ActivePlayer.system and ActivePlayer.system.planets)
+    assert(pTable, "To get a planet's ownerColor by that planet's index, you must provide the .planets table from the planet's system.")
     if not pTable or not next(pTable) or indexOrName <= 0 or indexOrName > #pTable then return "Grey" end
 
     return pTable[indexOrName] and pTable[indexOrName].name or "Grey"
@@ -3339,7 +3289,7 @@ Planets.buildSystem = function(system, callback, skipAnimation)
     end
 
     Planets._nextSystem = false
-    Planets.updateShieldDisplay(skipAnimation)
+    PShield.updateUI(skipAnimation)
     --enable buttons
     tryCallback()
   end
@@ -3458,14 +3408,100 @@ Planets.onPlanetCardDropped = function(dropperColor, dropObj)
   end
 end
 
-Planets.updateShields = function()
-  if not ActivePlayer.system or not TacData.unitMap or not TacData.unitMap[ActivePlayer.system.guid] then return end
+PShield.setEnabled = function(toState, andShow)
+  toState = toState and true or false --cast to boolean
+  if PShield.enabled == toState or not ActivePlayer.system then return end
+
+  PShield.enabled = toState
+  PShield.setOverride()--reset overrides
+  if not toState then
+    PShield.setShowing(false)
+  elseif andShow then
+    PShield.setShowing(true)
+  end
+end
+
+PShield.setShowing = function(toState)
+  toState = toState and true or false
+  if not Invasion.active or PShield.visible == toState then return end
+  if not PShield.enabled then PShield.setEnabled(true, true) return end
+
+  PShield.visible = toState
+  if toState then
+    PShield.update()
+  else
+    PShield.updateUI()
+  end
+end
+
+--set or remove the shield override for a planet
+--toState = -1|0|1 : forceOff|removeOverride|forceOn
+PShield.setOverride = function(nameOrIndex, toState)
+  if not ActivePlayer.system or not ActivePlayer.system.planets or not PShield.enabled then return end
+  if not nameOrIndex or nameOrIndex == "all" then
+    for i = 1, 5, 1 do
+      PShield.setOverride(i, toState)
+      return
+    end
+  end
+  local pIndex = nameOrIndex
+  if type(nameOrIndex) == "string" then
+    pIndex = 0
+    for i,each in ipairs(ActivePlayer.system.planets or {}) do
+      if each.name == nameOrIndex then pIndex = i break end
+    end
+  end
+  if pIndex < 1 or pIndex > #ActivePlayer.system.planets or pIndex > 5 then return end
+
+  local status = PShield.status[pIndex]
+  if not status then return end
+  toState = toState or 0
+  if toState ~= 0 and (not status.hasShield or not status.visible) then return end
+  status.override = toState
+  --set shield enabeld to override or natural state
+  status.enabled = toState ~= 0 and toState or (status.disabledLocally or PShield.status.disabled) and -1 or 1
+
+  if PShield.visible then PShield.updateUI(false, pIndex) end
+end
+
+PShield.toggleOverride = function(nameOrIndex)
+  if not ActivePlayer.system or not ActivePlayer.system.planets then return end
+  local pIndex = nameOrIndex
+  if type(nameOrIndex) == "string" then
+    pIndex = 0
+    for i,each in ipairs(ActivePlayer.system.planets or {}) do
+      if each.name == nameOrIndex then pIndex = i break end
+    end
+  end
+  if pIndex < 1 or pIndex > #ActivePlayer.system.planets or pIndex > 5 then return end
+
+  local status = PShield.status[pIndex] or {}
+  local next = status.enabled ~= 1 and 1 or -1
+  PShield.setOverride(pIndex, next)
+end
+
+PShield.isShielded = function(nameOrIndex)
+  if not ActivePlayer.system or not ActivePlayer.system.planets then return end
+  local pIndex = nameOrIndex
+  if type(nameOrIndex) == "string" then
+    pIndex = 0
+    for i,each in ipairs(ActivePlayer.system.planets or {}) do
+      if each.name == nameOrIndex then pIndex = i break end
+    end
+  end
+  if pIndex < 1 or pIndex > #ActivePlayer.system.planets or pIndex > 5 or not PShield.status[pIndex] then return end
+
+  return PShield.status[pIndex] and PShield.status[pIndex].enabled == 1 or false
+end
+
+PShield.update = function()
+  if not Invasion.active or not ActivePlayer.system or not TacData.unitMap or not TacData.unitMap[ActivePlayer.system.guid] then return end
 
   local function locationHasShield(location)
     local pOwner = Planets.getOwnerColor(location)
     if not pOwner or pOwner == "Grey" then return false end
 
-    local pUnits =  MultiRoller.getAttributes(pOwner, ActivePlayer.color ~= pOwner and ActivePlayer.color or false, "BOMBARDMENT", location)
+    local pUnits = MultiRoller.getAttributes(pOwner, ActivePlayer.color ~= pOwner and ActivePlayer.color or false, "BOMBARDMENT", location)
     for eachUnit,attrs in pairs(pUnits) do
       if attrs.planetaryShield and attrs.count and attrs.count > 0 then
         return true
@@ -3475,7 +3511,8 @@ Planets.updateShields = function()
     return false
   end
 
-  Planets.shieldStatus = { system = ActivePlayer.system, disabled = false}
+  local prevStatus = PShield.status or {}
+  PShield.status = { system = ActivePlayer.system, disabled = false}
   --Does the active player have any "disablePlanetaryShield" units in system?
   local activeFleet = MultiRoller.getAttributes(ActivePlayer.color, nil, "BOMBARDMENT", "Space")
   local _localallyDisabled = {}
@@ -3496,106 +3533,73 @@ Planets.updateShields = function()
           end
         end
       else
-        Planets.shieldStatus.disabled = true
+        PShield.status.disabled = true
         break
       end
     end
   end
 
-  for i,eachPlanet in ipairs(ActivePlayer.system.planets or {}) do
-    --Does the planet owner have any units on this planet
-    local result = locationHasShield(eachPlanet.name)
-    local status = { name = eachPlanet.name, hasShield = result, disabledLocally = _localallyDisabled[eachPlanet.name] or false, override = Planets.shieldUI[i].override}
-    --determine the state the ui SHOULD be in after overrides
-    status.enabled = not result and 0 or status.override ~= 0 and status.override or (status.disabledLocally or Planets.shieldStatus.disabled) and -1 or 1
-    Planets.shieldStatus[i] = status
-  end
+  --init status tables
+  local planetCount = ActivePlayer.system.planets and #ActivePlayer.system.planets or 0
+  for i = 1, 5, 1 do
+    local planet = i <= planetCount and ActivePlayer.system.planets[i] or false
+    local status = {enabled = 0, override = 0, visible = prevStatus[i] and prevStatus[i].visible or false}
 
-  --maybe update ui
-  Planets.updateShieldDisplay()
-end
-
---set or remove the shield override for a planet
---toState = -1|0|1 : forceOff|removeOverride|forceOn
-Planets.setShieldStatus = function(nameOrIndex, toState)
-  if not ActivePlayer.system or not ActivePlayer.system.planets then return end
-  local pIndex = nameOrIndex
-  if type(nameOrIndex) == "string" then
-    pIndex = 0
-    for i,each in ipairs(ActivePlayer.system.planets or {}) do
-      if each.name == nameOrIndex then pIndex = i break end
+    if planet then
+      --Does the planet owner have any units on this planet
+      local result = locationHasShield(planet.name)
+      status.name =planet.name
+      status.hasShield = result
+      status.disabledLocally = _localallyDisabled[planet.name] or false
+      status.override = result and prevStatus[i] and prevStatus[i].override or 0
+      --determine the state the ui SHOULD be in after overrides
+      status.enabled = not result and 0 or status.override ~= 0 and status.override or (status.disabledLocally or PShield.status.disabled) and -1 or 1
+      PShield.status[i] = status
     end
   end
-  if pIndex < 1 or pIndex > #ActivePlayer.system.planets or pIndex > 5 then return end
 
-  local status = Planets.shieldStatus[pIndex]
-  if not status or not status.hasShield then return end
-  status.override = toState
-  --set shield enabeld to override or natural state
-  status.enabled = toState ~= 0 and toState or (status.disabledLocally or Planets.shieldStatus.disabled) and -1 or 1
-
-  --maybe update display
-  Planets.updateShieldDisplay(type(nameOrIndex) == "string" and nameOrIndex or Planets.getName(pIndex))
-end
-
-Planets.isShielded = function(nameOrIndex)
-  if not ActivePlayer.system or not ActivePlayer.system.planets then return end
-  local pIndex = nameOrIndex
-  if type(nameOrIndex) == "string" then
-    pIndex = 0
-    for i,each in ipairs(ActivePlayer.system.planets or {}) do
-      if each.name == nameOrIndex then pIndex = i break end
-    end
-  end
-  if pIndex < 1 or pIndex > #ActivePlayer.system.planets or pIndex > 5 or not Planets.shieldStatus[pIndex] then return end
-
-  return Planets.shieldStatus[pIndex].enabled == 1
+  if PShield.visible then PShield.updateUI() end
 end
 
 --onlyUpdatePlanet* optional or planetIndex, updates all planets if nil
 local _animatingShields = {} --{[1] = {targetState}}
-Planets.updateShieldDisplay = function(skipAnimation, onlyUpdatePlanet)
+PShield.updateUI = function(skipAnimation, onlyUpdatePlanet)
   --only update if Invasion is open | Shield status has been gathered for the system | The planets are ready to display shields
-  if Tac.State ~= Tac.eStates.Invasion() --ui not visible
-    or not Planets.shieldStatus.system  --we dont have the unit data yet, abort
+  if not Invasion.active --ui not visible
+    or not PShield.status.system  --we dont have the unit data yet, abort
     or Planets._nextSystem --the planets are still animating, they will dispaly shields when finished
-    or Planets.shieldStatus.system ~= Planets._displayedSystem  --Unit data is from previous system
+    or PShield.status.system ~= ActivePlayer.system
   then return end
   skipAnimation = skipAnimation or Tac.disableAnimations
+  --if PShield.status.system ~= Planets._displayedSystem and not   --Unit data is from previous system
 
   local function updatePlanetShield(i)
-    if not Planets.shieldStatus[i] then return end
     if _animatingShields[i] then return end --will self update after animation
 
-    local uiState = Planets.shieldUI[i]
-    local dataState = Planets.shieldStatus[i]
+    local dataState = PShield.status[i] or {enabled = 0, visible = false, override = 0}
 
     local function onShieldActivated(cancelAnim)
       _animatingShields[i]= nil
-      Planets.shieldUI[i].active = true
-      Planets.shieldUI[i].enabled = 1
+      PShield.status[i].visible = true
       ui.batchSet("p"..i.."_Btn_shieldOverride", {active = true, interactable = true, sprite = "Btn_PShield_NoOverride"})
 
-      Planets.updateShieldDisplay(skipAnimation or cancelAnim == -1, i)
+      PShield.updateUI(skipAnimation or cancelAnim == -1, i)
     end
 
     --does the shield UI need to be deactivted?
-    if dataState.enabled == 0 then
-      if not uiState.active then return end
+    if dataState.enabled == 0 or not PShield.visible then
+      if not dataState.visible then return end
 
       if skipAnimation then ui.batchSet("p"..i.."_shieldShowSkip", {active = false}) end
       self.UI.hide("p"..i.."_ShieldDisabled")
       self.UI.hide("p"..i.."_ShieldEnabled")
       ui.batchSet("p"..i.."_Btn_shieldOverride", {active = false, interactable = false})
-      uiState.active = false
-      uiState.enabled = 0
-      uiState.override = 0
-      uiState.hasShield = false
+      dataState.visible = false
       return
     end
 
     --does the shield UI need to be activted?
-    if(not uiState.active and dataState.enabled ~= 0) then
+    if PShield.visible and dataState.enabled ~= 0 and not dataState.visible then
       _animatingShields[i] = Coru.wait(0.61, onShieldActivated)
       ui.batchSet("p"..i.."_shieldShowSkip", {active = true})
       self.UI.show("p"..i.."_ShieldEnabled")
@@ -3618,77 +3622,118 @@ Planets.updateShieldDisplay = function(skipAnimation, onlyUpdatePlanet)
       })
     end
 
-    uiState.override = dataState.override
-    if uiState.enabled == dataState.enabled then return end
     if dataState.enabled == -1 then
       self.UI.show("p"..i.."_ShieldDisabled")
     else
       self.UI.hide("p"..i.."_ShieldDisabled")
     end
-
-    uiState.enabled = dataState.enabled
   end
 
   if onlyUpdatePlanet then
     updatePlanetShield(type(onlyUpdatePlanet) == "number" and onlyUpdatePlanet or Planets.getIndex(onlyUpdatePlanet))
   else
-    for i,eachPlanet in ipairs(ActivePlayer.system.planets or {}) do
+    for i = 1, 5, 1 do
       updatePlanetShield(i)
     end
   end
 end
 
-Planets.clearShields = function()
-  for i,each in ipairs(Planets.shieldUI) do
-    each.active = false
-    each.enabled = 0
-    each.override = 0
-    Planets.shieldStatus.disabled = false
-    Planets.shieldStatus[i] = {
-      name = false,
-      override = 0,
-      enabled = 0,
-      hasShield = false,
-      disabledLocally = false
-    }
-    --Hide UI and disable shield buttons
-    ui.batchSet("p"..i.."_shieldShowSkip", {active = false})
-    --todo: Reset override btn
-    ui.batchSet("p"..i.."_Btn_shieldOverride", {active = false, interactable = false, sprite = "Btn_PShield_NoOverride", highlightedSprite = "Btn_PShield_Disable_Dark", pressedSpreite = "Btn_PShield_Disable"})
-    self.UI.hide("p"..i.."_ShieldEnabled")
-    self.UI.hide("p"..i.."_ShieldDisabled")
+Plasma.setEnabled = function(toState, andShow)
+  toState = toState and true or false
+  if Plasma.enabled == toState then return end
+  if toState and (not Invasion.active or not Plasma.hasPS()) then return end
+
+  Plasma.enabled = toState
+  Plasma.setTarget(toState and "default")
+  if not toState then
+    Plasma.setShowing(false)
+  elseif andShow then
+    Plasma.setShowing(true)
   end
 end
 
-Planets.shieldUI = { --state of the UI
-  --[[[1] = {
-    active = false,
-    enabled = 0,
-    override = 0
-  }--]]
-}
-Planets.shieldStatus = {--[[ state of the data
-  disabled = false, --active player has a disablePlanetaryShield in system
-  [1] = {
-    enabled = 0, --The state that the shield should be in after checking: override - disabled - disabledLocally : -1:disabled, 0: Not visible, 1:enabled
-    name = false,
-    hasShield = false, --are there units with PShield ability
-    disabledLocally = false, --planet contains an active player's unit with disablePlanetaryShield = "onThisPlanet"
-    override = 0, -- -1: force disabled, 0: no override, 1 force enabled
-  }--]]
-}
+Plasma.setShowing = function(toState)
+  toState = toState and true or false
+  if Plasma.visible == toState then return end
+  if toState and not Plasma.enabled then Plasma.setEnabled(true) return end
 
---Multiroller functionality-----------------------------------------------------
+  Plasma.visible = toState
+  Plasma.update()
+end
 
---[[
-TacData = {
+Plasma.hasPS = function(color)
+  color = color or ActivePlayer.color
+  local modifiers = _getColorToUnitModifiers() or {}
+  for _, modifier in ipairs(modifiers[color] or {}) do
+      if modifier == 'Plasma Scoring' then
+          return true
+      end
+  end
+
+  return false
+end
+
+Plasma.update = function()
+  if not Invasion.active or not Plasma.enabled then return end
+  if not Plasma.hasPS() then Plasma.setEnabled(false) return end
+
+  Plasma.setTarget(Plasma.target or "default")
+  Plasma.updateUI()
+end
+
+Plasma.updateUI = function()
+  if not Plasma.visible then
+    for i = 1, 5, 1 do
+      ui.batchSet("p"..i.."_Btn_PlasmaScoring", { active = false, interactable = false})
+    end
+    return
+  end
+  --else
+
+  for i = 1, 5, 1 do
+    ui.batchSet("p"..i.."_Btn_PlasmaScoring", {
+      active = false, interactable = false,
+      isOn = i == Plasma.target,
+      sprite = i == Plasma.target and "Icon_PlasmaScoring_Active" or "Icon_PlasmaScoring",
+      pressedSprite = i == Plasma.target and "Icon_PlasmaScoring" or "Icon_PlasmaScoring_Active",
+    })
+  end
+  local planets = ActivePlayer.system and ActivePlayer.system.planets or {}
+  for i,eachPlanet in ipairs(planets) do
+    ui.batchSet("p"..i.."_Btn_PlasmaScoring", { active = true, interactable = true})
+  end
+end
+
+--set planetIndex = # or nil to remove any target or 0\"default" to find and set to a default target
+Plasma.setTarget = function(planetIndex, toggle)
+  local target = planetIndex == "default" and 0 or planetIndex or -1
+  target = target <= 5 and target or -1 --planets have been capped at having 5 planets
+
+  if toggle and planetIndex == Plasma.target then target = -1 end
+
+  if target == 0 then
+    local planets = ActivePlayer.system and ActivePlayer.system.planets or {}
+    for i,eachPlanet in ipairs(planets) do
+      local _isOn = Planets.getOwnerColor(eachPlanet.name) ~= ActivePlayer.color
+      if _isOn then target = i break end
+    end
+  end
+
+  if Plasma.target == target then return end
+  Plasma.target = target > 0 and target or false
+  Plasma.updateUI()
+end
+
+--MultiRoller functionality-----------------------------------------------------
+
+--[[TacData = {
   activeColor = ""
   activeSystem = {hex = "hex", system = systemTable},
-  adjacentSystems = {}
+  adjacentSystems = {} [perColor] = {["systemGuid1"] = {hex = "hexPosition", system = systemTableRef}, ["g2"] =...}
   adjacentSystems
-  unitMap
+  unitMap = {}--see MultiRoller.buildUnitMap for details
   hexToUnits
-  initialized
+  initialized = bool
 }--]]
 
 --location = planetName or "Space"
@@ -3759,38 +3804,6 @@ local ENGAGEMENT_TYPE = {
     GROUND_COMBAT = { name = 'Ground Combat', perPlanet = true, rollType = 'groundCombat' }
 }
 
-
---depricated
-function getHexAndAdjacent(position, playerColor)
-    assert(type(position) == 'table' and type(position.x) == 'number')
-    assert(type(playerColor) == 'string')
-
-    -- Get this hex, and adjacent hexes.
-    local hex = _systemHelper.hexFromPosition(position)
-    local adjacentHexes = _systemHelper.hexNeighborsWithHyperlanes(hex)
-
-    -- Include through-wormhole.
-    local adjacentWormholeHexes = _systemHelper.hexAdjacentWormholes({
-        hex = hex,
-        playerColor = playerColor
-    })
-    for _, wormholeHex in ipairs(adjacentWormholeHexes) do
-        table.insert(adjacentHexes, wormholeHex)
-    end
-
-    -- Remove any duplicates.
-    local uniq = {}
-    local seen = {}
-    for _, hex in ipairs(adjacentHexes) do
-        if not seen[hex] then
-            table.insert(uniq, hex)
-            seen[hex] = true
-        end
-    end
-
-    return hex, uniq
-end
---depricated
 function getHexToUnits(units)
     assert(type(units) == 'table')
 
@@ -3805,35 +3818,6 @@ function getHexToUnits(units)
     end
     return hexToUnits
 end
---[[function getOpponentColor(selfColor, unitsInHex)
-    assert(type(selfColor) == 'string' and type(unitsInHex) == 'table')
-
-    if selfColor == ActivePlayer.color then
-      return getDefender()\
-
-    -- If self is not the activating player, then activating player is enemy.
-    -- (This could be a third player firing PDS2 from an adjacent hex).
-    if selfColor ~= ActivePlayer.color then
-        return ActivePlayer.color
-    end
-
-    -- If there are any ships this is a space combat.  Get ship color.
-    local genericAttrs = _unitHelper.getUnitAttributes({})
-    for _, unit in ipairs(unitsInHex) do
-        if unit.color and unit.color ~= selfColor then
-            if genericAttrs[unit.unitType].spaceCombat then
-                return unit.color
-            end
-        end
-    end
-
-    -- Otherwise ground combat?  Get any unit color (assume already filtered to planet).
-    for _, unit in ipairs(unitsInHex) do
-        if unit.color and unit.color ~= selfColor then
-            return unit.color
-        end
-    end
-end--]]
 
 MultiRoller.rewritePositionAndHexForInArenaUnits = function(hex, units)
     assert(type(hex) == 'string' and type(units) == 'table')
@@ -4140,10 +4124,34 @@ MultiRoller.getAttributes = function(color, opponentColor, engagementType, locat
   return unitAttrs
 end
 
+--queue functionality added to bombardment & spaceCannonDef to roll for all planets with 1 click
+local _activeRolls = {}--[color] = {engagementType, timestamp}
+local _rollQueue = {}--[color] = {params,{...}}
+--each player can have a queue of a single roll type at a time (cannot Q bombardment if spaceCannon is Q'd)
+--however, a queue for a given roll type may have multiple rolls of that type waiting
 MultiRoller.resolveEngagement = function(color, engagementType, location, fillOnly)
   assert(eEngagementTypes[engagementType])
   local _multiRollerObj = MultiRoller.getRoller(color)
   assert(_multiRollerObj, "ROLL ABORTED: Could not find the " .. color .. " player's Multi-Roller")
+
+  --if the player is already rolling for this engagment, queue the roll
+  --Only allow spaceCannonDef and bombardment rolls to queue (To resolve all rolls of that type with one click). Other roll types don't need this functionality
+  local function maybeQueueRoll()
+    if not _activeRolls[color] or (engagementType ~= "spaceCannonDef" and engagementType ~= "bombardment") then return false end
+    local timeStamp = Time.time
+    if timeStamp - _activeRolls[color].timeStamp >= 8 then
+      --previous active roll timed out or was resolved and we did not get a callback
+      _activeRolls[color] = false
+      _rollQueue[color] = {} --clear any queued rolls too, this is likely an error scenario
+      return false
+    end
+    --dont queue if we are rolling a diferent type of ability
+    if _activeRolls[color].engagementType ~= engagementType then return false end
+    _rollQueue[color] = _rollQueue[color] or {}
+    table.insert(_rollQueue[color], {color = color, engagementType = engagementType, location = location, fillOnly = fillOnly})
+    return true
+  end
+  if maybeQueueRoll() then return end
 
   --update/rebuild unit tables
   MultiRoller.buildUnitMap(ActivePlayer.system)
@@ -4203,8 +4211,8 @@ MultiRoller.resolveEngagement = function(color, engagementType, location, fillOn
 
   local plasmaScoring = false
   if engagementType == "bombardment" then
-    if Planets.isShielded(location) then pcall(broadcastToAll("Unable to bombard: Planet is protected by a planetary shield.", "Red")) return end
-    plasmaScoring = Planets.plasmaTarget and Planets.getName(Planets.plasmaTarget) == location
+    if PShield.isShielded(location) then pcall(broadcastToAll("Unable to bombard: "..location.." is protected by a planetary shield.", "Red")) return end
+    plasmaScoring = Plasma.target and Planets.getName(Plasma.target) == location
   elseif engagementType == "spaceCannonDef" or engagementType == "spaceCannonOff" then
     local uMods = _getColorToUnitModifiers()
     for _,eachMod in ipairs(uMods[color] or {}) do
@@ -4283,6 +4291,12 @@ MultiRoller.resolveEngagement = function(color, engagementType, location, fillOn
   end
   pcall(printToAll(generateMsg(), color))
 
+  if fillOnly then
+      pcall(printToColor('AutoFill: Units filled; left click to fill and roll.', params.clickerColor, "Yellow"))
+  else
+      _activeRolls[color] = {timeStamp = Time.time, engagementType = engagementType}
+  end
+
   --printTable(unitAttributes)
   --printTable(engagedUnitCount)
   local doClick = not fillOnly
@@ -4293,9 +4307,24 @@ MultiRoller.resolveEngagement = function(color, engagementType, location, fillOn
       plasmaScoring = plasmaScoring,
       rollType = doClick and rollType or false,
       extraModifiers = extraUnitModifiers or false,
+      callback = {obj = self, func = "onMultirollComplete"}
   })
-  if fillOnly then
-      pcall(printToColor('AutoFill: Units filled; left click to fill and roll.', params.clickerColor, "Yellow"))
+end
+
+function onMultirollComplete(params)
+  params = params or {}
+  local color = params.color or false
+  if not color then return end
+
+  _activeRolls[color] = false
+  if params.error then
+    _rollQueue[color] = nil
+    return
+  else
+    if not _rollQueue[color] or not next(_rollQueue[color]) then return end
+    local nextRoll = table.remove(_rollQueue[color], 1)
+    pcall(printToAll("\nRoll for "..nextRoll.location..":", color))
+    MultiRoller.resolveEngagement(nextRoll.color, nextRoll.engagementType, nextRoll.location, nextRoll.fillOnly)
   end
 end
 
@@ -4745,18 +4774,6 @@ function autoFillCoroutine()
     return 1
 end
 
---AutoFill params:
---[[
-multiRoller.call('inject', {
-    clickerColor = params.clickerColor,
-    vsColor = enemyColor,
-    unitTypeToCount = fillUnitTypeToCount,
-    plasmaScoring = plasmaScoring and true or false,
-    rollType = doClick and autofillTypeAttributes.rollType or false,
-    extraModifiers = extraUnitModifiers or false,
-    rollObjectGuid = _rollOnSelf and self.getGUID(),
-})--]]
-
 --UI button events--------------------------------------------------------------
 function onButtonClicked_TacState(clickPlayer, btnIsOn, btnID)
   local switch = {
@@ -4876,6 +4893,37 @@ function onSmartButtonClicked(clickPlayer, mouseBtn, btnID)
   end
 end
 
+--Resolves spaceCannonDef or bombardment on all possible planets
+function onSmartButtonClicked_AutoResolve(clickPlayer, mouseBtn, btnID)
+  local clickType = mouseBtn == "-1" and "roll" or mouseBtn == "-2" and "fill" or false
+  if not clickType or not ActivePlayer.system then return end
+  local rollTarget = assert(ui.btnLookup[btnID].rollTarget)
+  local function clickerCanRollFor(color)
+    if not Tac.rollForMe[color] and clickPlayer.color ~= color then
+      pcall(printToColor("The ".. color .. " has disabled Roll-For-Me.", clickPlayer.color, "Yellow"))
+      return false
+    end
+
+    return true
+  end
+
+  --Auto resolve each SpcDeff
+  if rollTarget == "spaceCannonDef" then
+    for _,eachPlanet in ipairs(ActivePlayer.system.planets or {}) do
+      local owner = Planets.getOwnerColor(eachPlanet.name)
+      if owner ~= "Grey" and owner ~= ActivePlayer.color and clickerCanRollFor(owner) then
+        MultiRoller.resolveEngagement(owner, "spaceCannonDef", eachPlanet.name, clickType == "fill" and true or false)
+      end
+    end
+  --Auto resolve each bombardment
+  elseif clickerCanRollFor(ActivePlayer.color) then
+    Plasma.setEnabled(true)
+    for _,eachPlanet in ipairs(ActivePlayer.system.planets or {}) do
+      MultiRoller.resolveEngagement(ActivePlayer.color, "bombardment", eachPlanet.name, clickType == "fill" and true or false)
+    end
+  end
+end
+
 function onButtonClicked_InvasionStep(clickPlayer, btnIsOn, btnID)
   local idToState = {
     ["Btn_SpaceCannonDefMode"] = "SpaceCannonDef",
@@ -4885,10 +4933,23 @@ function onButtonClicked_InvasionStep(clickPlayer, btnIsOn, btnID)
   --if disabling this state, revert to overview unless a planet is in focus; in which case set to ground combat
   Invasion.setState(btnIsOn and idToState[btnID] or Invasion.focus and Invasion.eStates.GroundCombat() or Invasion.eStates.Overview())
 end
---planetIndex = i of the planet in its system's planet table
-function onQuickRollBombardment(clickPlayer, planetIndex, btnID)
+
+function onQuickRollBombardment(clickPlayer, mouseBtn, btnID)
+  local clickType = mouseBtn == "-1" and "roll" or mouseBtn == "-2" and "fill" or false
+  local pIndex = tonumber(string.sub(btnID, 2, 2)) or false
+  local planet = Planets.getName(pIndex)
+  if not clickType or not pIndex or not planet then return end
+
+  MultiRoller.resolveEngagement(clickPlayer.color, "bombardment", planet, clickType == "fill" and true or false)
 end
-function onQuickRollSpaceCannonDef(clickPlayer, planetIndex, btnID)
+
+function onQuickRollSpaceCannonDef(clickPlayer, mouseBtn, btnID)
+  local clickType = mouseBtn == "-1" and "roll" or mouseBtn == "-2" and "fill" or false
+  local pIndex = tonumber(string.sub(btnID, 2, 2)) or false
+  local planet = Planets.getName(pIndex)
+  if not clickType or not pIndex or not planet then return end
+
+  MultiRoller.resolveEngagement(clickPlayer.color, "spaceCannonDef", planet, clickType == "fill" and true or false)
 end
 
 function onPlanetButtonClicked(clickerPlayer, planetIndex, btnID)
@@ -4900,14 +4961,18 @@ function onButtonClicked_PShieldOverride(clickerPlayer, mouseBtn, btnID)
   local pIndex = tonumber(string.sub(btnID, 2, 2)) or false
   if not clickType or not pIndex or not Invasion.active then return end
 
-  Planets.setShieldStatus(pIndex, clickType == "revert" and 0 or Planets.shieldStatus[pIndex].enabled ~= 1 and 1 or -1)
+  if clickType == "toggle" then
+    PShield.toggleOverride(pIndex)
+  else
+    PShield.setOverride(pIndex, 0)
+  end
 end
 
 function onPlasmaTargetSelected(clickerPlayer, mouseBtn, btnID)
   if mouseBtn ~= "-1" or not Invasion.active then return end
   local pIndex = tonumber(string.sub(btnID, 2, 2)) or false
 
-  Invasion.setPlasmaTarget(pIndex)
+  Plasma.setTarget(pIndex, "toggle")
 end
 
 --TI4 Event receivers-----------------------------------------------------------
@@ -4936,10 +5001,7 @@ function onPlayerPing(player, position, object)
   --activateSystem()
   --MultiRoller.buildUnitMap(ActivePlayer.system)
   --Planets.updateShields()
-  print("________\nStatus:")
-  printTable(Planets.shieldStatus)
-  printTable(Planets.shieldUI[1])
-  print("isShielded = ", Planets.isShielded(1))
+
   Wait.frames(function()
   end, 20)
 
