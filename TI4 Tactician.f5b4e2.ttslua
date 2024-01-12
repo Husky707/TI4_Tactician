@@ -1999,7 +1999,7 @@ ui.generateXML = function(callback)
         }
       }
       ui.insertXml(planet, "Pnl_InvasionHex_Lower")
-      PShield.status[i] = {enabled = 0, override = 0, visible = 0}
+      PShield.status[i] = {enabled = 0, override = 0, visible = false}
     end
   end
   planets()
@@ -2461,7 +2461,7 @@ ui.setSmartButtonColors = function(setDefenders, setBoth)
       ui.batchSet(each, {color = MultiRoller.getDefender("Space")})
     end
 
-    ui.batchSet("SmartBtn_InvasionContext_Def", {color = MultiRoller.getDefender(Invasion.focus) or "Grey"})
+    ui.batchSet("SmartBtn_InvasionContext_Def", {color = Planets.getFocusOrSoloOwner() or "Grey"})
     if not setBoth then return end
   end
 
@@ -2886,7 +2886,7 @@ Invasion.openState = function(state, params)
     ToggleButton.setState(ToggleButton.btns["Btn_SpaceCannonDefMode"], true)
 
     Invasion.setContext(state)
-    ui.batchSet("SmartBtn_SpaceCannonDef", {color = MultiRoller.getDefender(Invasion.focus) or "Grey"})
+    ui.batchSet("SmartBtn_SpaceCannonDef", {active = true, interactable = true, color = Planets.getFocusOrUniformOwner()})
   end
 
   local function openBombardment()
@@ -2904,6 +2904,8 @@ Invasion.openState = function(state, params)
 
   local function openOverview()
     Invasion.setContext()
+    ui.batchSet("SmartBtn_Bombardment", {active = true, interactable = true, color = ActivePlayer.color or "Grey"})
+    ui.batchSet("SmartBtn_SpaceCannonDef", {active = true, interactable = true, color = Planets.getFocusOrUniformOwner() or "Grey"})
   end
 
   local switch = {
@@ -3005,7 +3007,7 @@ Invasion.setFocus = function(pIndex, skipAnimation) --index of the planet in its
 
     local fBool = Invasion.focus and true or false
     if fBool then
-      ui.batchSet("SmartBtn_InvasionContext_Def", {color = Planets.getOwnerColor(target)})
+      ui.batchSet("SmartBtn_InvasionContext_Def", {color = Planets.getOwner(target)})
       ui.batchSet("Txt_HexFocusLabel", {text = string.upper(target)})
       --enter ground combat context when planet is clicked
       if not Invasion.context then Invasion.setState(Invasion.eStates.GroundCombat()) end
@@ -3014,10 +3016,10 @@ Invasion.setFocus = function(pIndex, skipAnimation) --index of the planet in its
       if Invasion.State == Invasion.eStates.GroundCombat() then Invasion.setState(Invasion.eStates.Overview()) end
 
       --maybe remove smart button color
-      local soloPlanet = ActivePlayer.system and ActivePlayer.system.planets and #ActivePlayer.system.planets == 1 and ActivePlayer.system.planets[1].name or false
-      ui.batchSet("SmartBtn_InvasionContext_Def", {color = soloPlanet and Planets.getOwnerColor(soloPlanet) or "Grey"})
+      ui.batchSet("SmartBtn_InvasionContext_Def", {color = Planets.getFocusOrSoloOwner()})
     end
     ui.batchSet("Hex_FocusNameplate", {active = fBool})
+    ui.batchSet("SmartBtn_SpaceCannonDef", {color = Planets.getFocusOrUniformOwner()})
   end
 
   Planets.setFocus({callback = onFocusChangeComplete, skipAnimation = skipAnimation}, not target)
@@ -3048,7 +3050,7 @@ Invasion.setContext = function(state)
   --Set smart context colors
   ui.batchSet("SmartBtn_InvasionContext_Att", {active = setActive, interactable = setActive, color = setActive and ActivePlayer.color or "Grey"})
   ui.batchSet("SmartBtn_InvasionContext_Def", {active = setActive, interactable = setActive,
-    color = setActive and contextSettings[state].defender and MultiRoller.getDefender(contextSettings[state].defender) or "Grey"})
+    color = setActive and Planets.getFocusOrSoloOwner()})--contextSettings[state].defender and MultiRoller.getDefender(contextSettings[state].defender)
 end
 
 --Setting context also shows
@@ -3147,7 +3149,7 @@ end
 
 --indexOrName of planet
 --pTable = table of all planets in this system *optional, defaults to active system
-Planets.getOwnerColor = function(indexOrName, pTable)
+Planets.getOwner = function(indexOrName, pTable)
   local function nameFromIndex()
     pTable = pTable or (ActivePlayer.system and ActivePlayer.system.planets)
     assert(pTable, "To get a planet's ownerColor by that planet's index, you must provide the .planets table from the planet's system.")
@@ -3162,6 +3164,32 @@ Planets.getOwnerColor = function(indexOrName, pTable)
 
   local pCard = Planets.getCard(pName)
   return pCard ~= nil and _zoneHelper.zoneFromPosition(pCard.getPosition()) or "Grey"
+end
+
+--gets the owner color of the only planet in a system
+Planets.getFocusOrSoloOwner = function()
+  if Invasion.focus then return Planets.getOwner(Invasion.focus) end
+  local planets = ActivePlayer.system and ActivePlayer.system.planets or false
+  return planets and #planets == 1 and Planets.getOwner(planets[1].name) or "Grey"
+end
+
+--gets the owner color of the focus planet, or the only player that controlls planets in the system -- returns "Grey" if mixed players
+Planets.getFocusOrUniformOwner = function(includeUncontrolledPlanets)
+  local color = Planets.getFocusOrSoloOwner()
+  --see if all planets in the system are owned by the same player (maybe ignoring uncontrolled grey planet owners)
+  if color == "Grey" and ActivePlayer.system then
+    local planets = ActivePlayer.system.planets or {}
+    local allSame = "init"
+    for _,each in ipairs(planets) do
+      local owner = Planets.getOwner(each.name)
+      if owner ~= "Grey" or includeUncontrolledPlanets then
+        allSame = allSame == "init" and owner or owner == allSame and owner
+        if not allSame then return "Grey" end
+      end
+    end
+    color = allSame ~= "init" and allSame or "Grey"
+  end
+  return color
 end
 
 --params = {isHS = bool, scale, offset} (only set scale and offset to overrid the default settings)
@@ -3188,12 +3216,12 @@ Planets.setPlanet = function(index, planetData, pCount, params)
 
   local function getFactionColor(getSecondary)
     --If not a faction planet, return owner color
-    return Planets.getOwnerColor(index)
+    return Planets.getOwner(index)
   end
 
   --else
   ui.batchSet(id, {active = true, offsetXY = params.offset or Planets.getOffset(index), scale = params.scale or Planets.getScale(index)})
-  ui.batchSet(id.."_ColorRing", {active = true, interactable = true, color = Planets.getOwnerColor(index)})
+  ui.batchSet(id.."_ColorRing", {active = true, interactable = true, color = Planets.getOwner(index)})
   ui.batchSet(id.."_Planet", {image = getPlanetImage(), color = (planetData.trait or planetData.name == "Mecatol Rex") and "White" or getFactionColor()})
   ui.batchSet(id.."_HS", {active = params.isHS and true or false, color = "Orange"}) --getFactionColor("secondary")})
   ui.batchSet(id.."_Txt", {text = string.upper(planetData.name)})
@@ -3395,14 +3423,14 @@ Planets._trackedCards = {}
 Planets.onPlanetCardDropped = function(dropperColor, dropObj)
   if not Invasion.active then return end
 
-  if not ActivePlayer.system or not ActivePlayer.system.planets or not next(ActivePlayer.system.planets) then return end
+  if not ActivePlayer.system then return end
   local objName = dropObj.getName()
   local owner = "Grey"
-  for i,eachPlanet in ipairs(ActivePlayer.system.planets) do
+  for i,eachPlanet in ipairs(ActivePlayer.system.planets or {}) do
     if objName == eachPlanet.name then
       owner = _zoneHelper.zoneFromPosition(dropObj.getPosition()) or "Grey"
       ui.batchSet("p"..i.."_ColorRing", {color = owner})
-      ui.batchSet("SmartBtn_InvasionContext_Def", {color = owner})
+      if Planets.getFocusOrSoloOwner() == owner then ui.batchSet("SmartBtn_InvasionContext_Def", {color = owner}) end
       return
     end
   end
@@ -3456,16 +3484,16 @@ PShield.setOverride = function(nameOrIndex, toState)
   local status = PShield.status[pIndex]
   if not status then return end
   toState = toState or 0
-  if toState ~= 0 and (not status.hasShield or not status.visible) then return end
+  if toState ~= 0 and not status.hasShield then return end
   status.override = toState
   --set shield enabeld to override or natural state
   status.enabled = toState ~= 0 and toState or (status.disabledLocally or PShield.status.disabled) and -1 or 1
 
-  if PShield.visible then PShield.updateUI(false, pIndex) end
+  PShield.updateUI(false, pIndex)
 end
 
 PShield.toggleOverride = function(nameOrIndex)
-  if not ActivePlayer.system or not ActivePlayer.system.planets then return end
+  if not PShield.enabled or not ActivePlayer.system or not ActivePlayer.system.planets then return end
   local pIndex = nameOrIndex
   if type(nameOrIndex) == "string" then
     pIndex = 0
@@ -3475,7 +3503,8 @@ PShield.toggleOverride = function(nameOrIndex)
   end
   if pIndex < 1 or pIndex > #ActivePlayer.system.planets or pIndex > 5 then return end
 
-  local status = PShield.status[pIndex] or {}
+  local status = PShield.status[pIndex] or false
+  if not status or not status.enabled then return end
   local next = status.enabled ~= 1 and 1 or -1
   PShield.setOverride(pIndex, next)
 end
@@ -3495,10 +3524,10 @@ PShield.isShielded = function(nameOrIndex)
 end
 
 PShield.update = function()
-  if not Invasion.active or not ActivePlayer.system or not TacData.unitMap or not TacData.unitMap[ActivePlayer.system.guid] then return end
+  if not PShield.enabled or (ActivePlayer.system and not TacData.unitMap or not TacData.unitMap[ActivePlayer.system.guid]) then return end
 
   local function locationHasShield(location)
-    local pOwner = Planets.getOwnerColor(location)
+    local pOwner = Planets.getOwner(location)
     if not pOwner or pOwner == "Grey" then return false end
 
     local pUnits = MultiRoller.getAttributes(pOwner, ActivePlayer.color ~= pOwner and ActivePlayer.color or false, "BOMBARDMENT", location)
@@ -3512,35 +3541,37 @@ PShield.update = function()
   end
 
   local prevStatus = PShield.status or {}
-  PShield.status = { system = ActivePlayer.system, disabled = false}
-  --Does the active player have any "disablePlanetaryShield" units in system?
-  local activeFleet = MultiRoller.getAttributes(ActivePlayer.color, nil, "BOMBARDMENT", "Space")
+  PShield.status = { system = ActivePlayer.system or false, disabled = false}
   local _localallyDisabled = {}
-  for unitType,eachUnit in pairs(activeFleet or {}) do
-    if eachUnit.disablePlanetaryShield and eachUnit.count and eachUnit.count > 0 then
-      --added support for disablePlanetaryShield = "onThisPlanet". Disables per planet with this unit rather than entire system
-      if eachUnit.disablePlanetaryShield == "onThisPlanet" then
-        --search Tac data for locations(planets) that have 1 or more of this unit
-        if TacData.unitMap and TacData.unitMap[TacData.activeSystem.system.guid] then
-          local systemSummary = TacData.unitMap[TacData.activeSystem.system.guid].summary or {}
-          for eachLocation,colorTables in pairs(systemSummary) do
-            if eachLocation ~= "Space" then
-              --does this planet have activePlayer units? A unit matching unitType? and check non-zero?
-              if colorTables[TacData.activePlayer] and colorTables[TacData.activePlayer][unitType] and  colorTables[TacData.activePlayer][unitType] > 0 then
-                _localallyDisabled[eachLocation] = true
+  --Does the active player have any "disablePlanetaryShield" units in system?
+  if ActivePlayer.system then
+    local activeFleet = MultiRoller.getAttributes(ActivePlayer.color, nil, "BOMBARDMENT", "Space")
+    for unitType,eachUnit in pairs(activeFleet or {}) do
+      if eachUnit.disablePlanetaryShield and eachUnit.count and eachUnit.count > 0 then
+        --added support for disablePlanetaryShield = "onThisPlanet". Disables per planet with this unit rather than entire system
+        if eachUnit.disablePlanetaryShield == "onThisPlanet" then
+          --search Tac data for locations(planets) that have 1 or more of this unit
+          if TacData.unitMap and TacData.unitMap[TacData.activeSystem.system.guid] then
+            local systemSummary = TacData.unitMap[TacData.activeSystem.system.guid].summary or {}
+            for eachLocation,colorTables in pairs(systemSummary) do
+              if eachLocation ~= "Space" then
+                --does this planet have activePlayer units? A unit matching unitType? and check non-zero?
+                if colorTables[TacData.activePlayer] and colorTables[TacData.activePlayer][unitType] and  colorTables[TacData.activePlayer][unitType] > 0 then
+                  _localallyDisabled[eachLocation] = true
+                end
               end
             end
           end
+        else
+          PShield.status.disabled = true
+          break
         end
-      else
-        PShield.status.disabled = true
-        break
       end
     end
   end
 
   --init status tables
-  local planetCount = ActivePlayer.system.planets and #ActivePlayer.system.planets or 0
+  local planetCount = ActivePlayer.system and ActivePlayer.system.planets and #ActivePlayer.system.planets or 0
   for i = 1, 5, 1 do
     local planet = i <= planetCount and ActivePlayer.system.planets[i] or false
     local status = {enabled = 0, override = 0, visible = prevStatus[i] and prevStatus[i].visible or false}
@@ -3558,7 +3589,7 @@ PShield.update = function()
     end
   end
 
-  if PShield.visible then PShield.updateUI() end
+  PShield.updateUI()
 end
 
 --onlyUpdatePlanet* optional or planetIndex, updates all planets if nil
@@ -3571,7 +3602,6 @@ PShield.updateUI = function(skipAnimation, onlyUpdatePlanet)
     or PShield.status.system ~= ActivePlayer.system
   then return end
   skipAnimation = skipAnimation or Tac.disableAnimations
-  --if PShield.status.system ~= Planets._displayedSystem and not   --Unit data is from previous system
 
   local function updatePlanetShield(i)
     if _animatingShields[i] then return end --will self update after animation
@@ -3607,6 +3637,7 @@ PShield.updateUI = function(skipAnimation, onlyUpdatePlanet)
     end
 
     --set the next state for override button to not this state
+    ui.batchSet("p"..i.."_Btn_shieldOverride",{active = true, interactable = true})
     if dataState.override == 0 then
       ui.batchSet("p"..i.."_Btn_shieldOverride", {
         sprite = "Btn_PShield_NoOverride",
@@ -3714,7 +3745,7 @@ Plasma.setTarget = function(planetIndex, toggle)
   if target == 0 then
     local planets = ActivePlayer.system and ActivePlayer.system.planets or {}
     for i,eachPlanet in ipairs(planets) do
-      local _isOn = Planets.getOwnerColor(eachPlanet.name) ~= ActivePlayer.color
+      local _isOn = Planets.getOwner(eachPlanet.name) ~= ActivePlayer.color
       if _isOn then target = i break end
     end
   end
@@ -3754,7 +3785,7 @@ MultiRoller.getDefender = function(location)
 
   --Planet owner is defender - even if they are also the active player
   local function getPlanetDefender()
-    return Planets.getOwnerColor(location) or "Grey"
+    return Planets.getOwner(location) or "Grey"
   end
 
   return location == "Space" and getSpaceDefender() or getPlanetDefender()
@@ -4801,12 +4832,17 @@ function onButtonClicked_MulitRoller(clickPlayer, mouseBtn, btnID)
   end
 
   local function resolveAtFocusPlanet(engagementType)
-    if not Invasion.focus then
-      engagementType = engagementType or rollTarget
-      pcall(printToAll("Select a planet before rolling for ".. engagementType..".", "Yellow"))
-      return
+    local planetTarget = Invasion.focus
+    if not planetTarget then
+      local soloPlanet = ActivePlayer.system and ActivePlayer.system.planets and ActivePlayer.system.planets[1] or false
+      if not soloPlanet then
+        engagementType = engagementType or rollTarget
+        pcall(printToAll("Select a planet before rolling for ".. engagementType..".", "Yellow"))
+        return -1
+      end
+      planetTarget = soloPlanet.name
     end
-    resolve(engagementType, Invasion.focus)
+    resolve(engagementType, planetTarget)
   end
 
   local function resolveContext()
@@ -4861,12 +4897,17 @@ function onSmartButtonClicked(clickPlayer, mouseBtn, btnID)
   end
 
   local function resolveAtFocusPlanet(smartCol, engagementType)
-    if not Invasion.focus then
-      engagementType = engagementType or rollTarget
-      pcall(printToAll("Select a planet before rolling for ".. engagementType..".", "Yellow"))
-      return -1
+    local planetTarget = Invasion.focus
+    if not planetTarget then
+      local soloPlanet = ActivePlayer.system and ActivePlayer.system.planets and ActivePlayer.system.planets[1] or false
+      if not soloPlanet then
+        engagementType = engagementType or rollTarget
+        pcall(printToAll("Select a planet before rolling for ".. engagementType..".", "Yellow"))
+        return -1
+      end
+      planetTarget = soloPlanet.name
     end
-    resolve(smartCol, engagementType, Invasion.focus)
+    resolve(smartCol, engagementType, planetTarget)
   end
 
   local function resolveContext(smartCol)
@@ -4910,7 +4951,7 @@ function onSmartButtonClicked_AutoResolve(clickPlayer, mouseBtn, btnID)
   --Auto resolve each SpcDeff
   if rollTarget == "spaceCannonDef" then
     for _,eachPlanet in ipairs(ActivePlayer.system.planets or {}) do
-      local owner = Planets.getOwnerColor(eachPlanet.name)
+      local owner = Planets.getOwner(eachPlanet.name)
       if owner ~= "Grey" and owner ~= ActivePlayer.color and clickerCanRollFor(owner) then
         MultiRoller.resolveEngagement(owner, "spaceCannonDef", eachPlanet.name, clickType == "fill" and true or false)
       end
