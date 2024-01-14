@@ -941,17 +941,19 @@ function Roller.addDice(params)
     table.insert(Roller._dice, copy)
 end
 
-function Roller.roll(clickerColor, playerColor, rollLabel)
+function Roller.roll(clickerColor, playerColor, rollLabel, callback)
     assert(type(clickerColor) == 'string', 'bad clickerColor')
     assert(type(playerColor) == 'string', 'bad playerColor')
     assert(type(rollLabel) == 'string', 'bad rollLabel')
+    assert(not callback or type(callback) == "table", "bad callback")
 
     local playerName = Player[playerColor] and Player[playerColor].steam_name or playerColor
     table.insert(Roller._rollQueue, {
         clickerColor = clickerColor,
         playerColor = playerColor,
         playerName = playerName,
-        rollLabel = rollLabel
+        rollLabel = rollLabel,
+        callback = callback
     })
     startLuaCoroutine(self, 'Roller_RollDiceCoroutine')
 end
@@ -1015,13 +1017,24 @@ function Roller_RollDiceCoroutine()
     local playerColor = params.playerColor
     local playerName = params.playerName
     local rollLabel = params.rollLabel
+    local callback = params.callback
+
+    local hits = 0
+    local function tryCallback(rollFailed)
+      if not callback or type(callback) ~= "table" or callback.obj == nil or not callback.obj.getVar(callback.func) then return end
+
+      local result = rollFailed and {error = rollFailed} or {rollType = rollLabel, color = clickerColor, hits = hits}
+      callback.obj.call(callback.func, result)
+    end
 
     if Roller.isRollInProgress() then
         printToColor('Dice are already being rolled.', clickerColor, {0.8,0.2,0.2})
+        tryCallback("rollInProgress")
         return 1
     end
     if #Roller._dice == 0 then
         printToColor('No valid units for ' .. rollLabel, clickerColor, {0.8,0.2,0.2})
+        tryCallback("noUnits")
         return 1
     end
     Roller._setRollInProgress(true)
@@ -1159,7 +1172,6 @@ function Roller_RollDiceCoroutine()
     -- Generate report.
     local specialMessages = {}
     local message = {}
-    local hits = 0
     for _, dice in ipairs(Roller._dice) do
         local item = '[HIT:' .. dice.hitValue
         if dice.critCount and dice.critValue then
@@ -1213,12 +1225,13 @@ function Roller_RollDiceCoroutine()
     end
 
     Roller._setRollInProgress(false)
+    tryCallback()
     return 1
 end
 
 -------------------------------------------------------------------------------
 
-function rollDiceForAbility(player, ability)
+function rollDiceForAbility(player, ability, callback)
     if player and ((not player.seated) or player.color == 'Grey') then
         return
     end
@@ -1265,7 +1278,7 @@ function rollDiceForAbility(player, ability)
     end
 
     self.clearButtons()
-    Roller.roll(clickerColor, playerZoneColor, rollLabel)
+    Roller.roll(clickerColor, playerZoneColor, rollLabel, callback)
 end
 
 function printUnitModifiers(unitAttrs, dstColor)
@@ -1421,6 +1434,7 @@ function inject(params)
     assert(type(params.plasmaScoring) == 'boolean')
     assert((not params.rollType) or type(params.rollType) == 'string')
     assert((not params.extraModifiers) or type(params.extraModifiers) == 'table')
+    assert(not params.callback or type(params.callback) == "table", "Roll callback must be a table with .obj and .func defined.")
 
     if params.clickerColor == 'Grey' then
         return
@@ -1443,7 +1457,7 @@ function inject(params)
     updateAbilities()
 
     if params.rollType then
-        rollDiceForAbility(false, params.rollType)
+        rollDiceForAbility(false, params.rollType, params.callback)
     end
 
     -- Require click handling absorb these this frame, otherwise lost.
